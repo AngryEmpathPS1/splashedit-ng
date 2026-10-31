@@ -752,6 +752,78 @@ DiscInfo writeDiscImage(const std::vector<DiscFile>& files, const std::string& v
     return info;
 }
 
+namespace {
+
+const uint8_t kVideoChunk[4] = {0x60, 0x01, 0x01, 0x80};  // the first bytes of every video sector
+
+std::string lowerExtension(const fs::path& file) {
+    std::string ext = utf8(file.extension());
+    for (char& ch : ext)
+        if (ch >= 'A' && ch <= 'Z') ch = char(ch + 32);
+    return ext;
+}
+
+// The sector layout a file's first bytes show: `stride` bytes a sector with its
+// subheader `skip` in, -t strv's having none. 0 when it is none of psxavenc's.
+void movieLayout(const uint8_t* in, size_t size, size_t& stride, size_t& skip) {
+    static const uint8_t sync[12] = {0, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0};
+    stride = skip = 0;
+    if (size >= kRawSectorSize && std::memcmp(in, sync, sizeof sync) == 0) {
+        stride = kRawSectorSize;
+        skip = 16;
+    } else if (size >= kSector && std::memcmp(in, kVideoChunk, sizeof kVideoChunk) == 0) {
+        stride = kSector;
+    } else if (size >= kMode2Sector && std::memcmp(in, in + 4, 4) == 0) {
+        stride = kMode2Sector;
+    }
+}
+
+}  // namespace
+
+bool isMovieFile(const fs::path& file) {
+    const std::string ext = lowerExtension(file);
+    return ext == ".str" || ext == ".sbs";
+}
+
+bool movieNameFits(const fs::path& file) {
+    std::string stem = utf8(file.stem());
+    for (char& ch : stem)
+        if (ch >= 'a' && ch <= 'z') ch = char(ch - 32);
+    return !stem.empty() && stem.size() <= 8 && std::all_of(stem.begin(), stem.end(), nameChar);
+}
+
+MovieInfo movieInfo(const fs::path& file) {
+    MovieInfo info;
+    std::error_code ec;
+    const uintmax_t bytes = fs::file_size(file, ec);
+    std::ifstream in(file, std::ios::binary);
+    if (ec || !in) return info;
+    std::vector<uint8_t> head(size_t(std::min<uintmax_t>(bytes, 32 * kRawSectorSize)));
+    in.read(reinterpret_cast<char*>(head.data()), std::streamsize(head.size()));
+    if (!in) return info;
+
+    if (lowerExtension(file) == ".sbs") {
+        info.ok = head.size() >= 8 && head[2] == 0x00 && head[3] == 0x38;
+        info.sbs = true;
+        info.sectors = uint32_t((bytes + kSector - 1) / kSector);
+        return info;
+    }
+    size_t stride = 0, skip = 0;
+    movieLayout(head.data(), head.size(), stride, skip);
+    if (stride == 0 || bytes % stride != 0) return info;
+    info.sectors = uint32_t(bytes / stride);
+    const size_t subheader = stride == kSector ? 0 : skip + 8;
+    for (size_t s = 0; (s + 1) * stride <= head.size(); s++) {
+        const uint8_t* sector = head.data() + s * stride;
+        if (stride != kSector && (sector[skip + 2] & 0x04)) info.audio = true;
+        if (info.ok || std::memcmp(sector + subheader, kVideoChunk, sizeof kVideoChunk) != 0) continue;
+        info.ok = true;
+        info.width = uint32_t(sector[subheader + 16] | (sector[subheader + 17] << 8));
+        info.height = uint32_t(sector[subheader + 18] | (sector[subheader + 19] << 8));
+    }
+    return info;
+}
+
 DiscFile loadMovie(const fs::path& file) {
     const std::vector<uint8_t> in = readFile(file);
     std::string stem = utf8(file.stem());
@@ -759,28 +831,16 @@ DiscFile loadMovie(const fs::path& file) {
         if (ch >= 'a' && ch <= 'z') ch = char(ch - 32);
 
     // A row of BS frames for a mesh: plain data, every frame starts with this mark.
-    std::string ext = utf8(file.extension());
-    for (char& ch : ext)
-        if (ch >= 'A' && ch <= 'Z') ch = char(ch + 32);
-    if (ext == ".sbs") {
+    if (lowerExtension(file) == ".sbs") {
         if (in.size() < 8 || in[2] != 0x00 || in[3] != 0x38) throw std::runtime_error("not a psxavenc -t sbs file");
         return {"MOVIES/" + stem + ".SBS", in, false};
     }
 
     DiscFile movie{"MOVIES/" + stem + ".STR", {}, true};
 
-    static const uint8_t sync[12] = {0, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0};
-    static const uint8_t chunk[4] = {0x60, 0x01, 0x01, 0x80};  // the first bytes of every video sector
     constexpr size_t kChunkAt = 8;  // past the subheader
     size_t stride = 0, skip = 0;
-    if (in.size() >= kRawSectorSize && std::memcmp(in.data(), sync, sizeof sync) == 0) {
-        stride = kRawSectorSize;
-        skip = 16;
-    } else if (in.size() >= kSector && std::memcmp(in.data(), chunk, sizeof chunk) == 0) {
-        stride = kSector;
-    } else if (in.size() >= kMode2Sector && std::memcmp(in.data(), in.data() + 4, 4) == 0) {
-        stride = kMode2Sector;
-    }
+    movieLayout(in.data(), in.size(), stride, skip);
     if (stride == 0 || in.size() % stride != 0) throw std::runtime_error("not a psxavenc movie");
 
     const size_t sectors = in.size() / stride;
@@ -797,7 +857,7 @@ DiscFile loadMovie(const fs::path& file) {
         } else {
             std::memcpy(to, from + skip, kMode2Sector);
         }
-        video = video || std::memcmp(to + kChunkAt, chunk, sizeof chunk) == 0;
+        video = video || std::memcmp(to + kChunkAt, kVideoChunk, sizeof kVideoChunk) == 0;
     }
     if (!video) throw std::runtime_error("no video in it");
     return movie;

@@ -153,6 +153,26 @@ constexpr size_t kMode2Sector = 2336;
 // std::runtime_error when the file is none of these or has no video sector.
 DiscFile loadMovie(const std::filesystem::path& file);
 
+// What a movie file is, for a list, from its start alone: a long movie is not
+// read to draw a row. `ok` when loadMovie would take it by the look of it;
+// `sbs` when it is frames for Movie.PlayOn, whose size only the mesh it plays on
+// says. `sectors` are its sectors on the disc, 150 a second at double speed.
+struct MovieInfo {
+    bool ok = false;
+    bool sbs = false;
+    bool audio = false;
+    uint32_t width = 0;
+    uint32_t height = 0;
+    uint32_t sectors = 0;
+};
+MovieInfo movieInfo(const std::filesystem::path& file);
+
+// A .str or .sbs file, whatever its case.
+bool isMovieFile(const std::filesystem::path& file);
+// Whether the file's stem can be a name on the disc and in Movie.Play: A-Z, 0-9
+// and _ once upper-cased, 8 characters at most.
+bool movieNameFits(const std::filesystem::path& file);
+
 // A CD-DA track as written: `start` is its INDEX 01 LBA (after its 150-sector
 // pregap), `sectors` its PCM sectors (the pregap not counted).
 struct DiscTrack {

@@ -148,6 +148,7 @@ jobs:
           "$py" tests/renderbufferscheck.py "$cli"
           "$py" tests/blendcheck.py "$cli"
           "$py" tests/disccheck.py "$cli"
+          "$py" tests/discmoviecheck.py "$cli"
           "$py" tests/cddacheck.py "$cli"
           "$py" tests/templatecheck.py "$cli"
           "$py" tests/samplecheck.py "$cli"

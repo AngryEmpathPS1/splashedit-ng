@@ -128,6 +128,14 @@ that scene's own export, and no `SCENE2`.
 
     python3 disccheck.py <splashpack-cli>
 
+`discmoviecheck.py` puts psxavenc's three STR layouts and a .sbs on a disc and reads them back as a
+drive does: every sector's subheader as it went in, Form 2 sectors kept Form 2 with their EDC, 2048
+bytes a sector in the directory. What is no movie, and a name the disc cannot hold, write no image.
+`discmovielistcheck.py` drives the Disc section's Movies list through the GUI, in a display 1300 tall.
+
+    python3 discmoviecheck.py <splashpack-cli>
+    xvfb-run -a -s "-screen 0 1600x1300x24" python3 discmovielistcheck.py <splashedit>
+
 `bvhstatscheck.py` exports the courtyard example with `--stats` and reads the
 `bvh nodes=N leaves=L depth=D refs=R` line: nodes and refs must match the splashpack header, refs the
 triangle count, leaves (N + 1) / 2 (every inner node has two children) and the depth at least
