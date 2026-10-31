@@ -757,6 +757,16 @@ DiscFile loadMovie(const fs::path& file) {
     std::string stem = utf8(file.stem());
     for (char& ch : stem)
         if (ch >= 'a' && ch <= 'z') ch = char(ch - 32);
+
+    // A row of BS frames for a mesh: plain data, every frame starts with this mark.
+    std::string ext = utf8(file.extension());
+    for (char& ch : ext)
+        if (ch >= 'A' && ch <= 'Z') ch = char(ch + 32);
+    if (ext == ".sbs") {
+        if (in.size() < 8 || in[2] != 0x00 || in[3] != 0x38) throw std::runtime_error("not a psxavenc -t sbs file");
+        return {"MOVIES/" + stem + ".SBS", in, false};
+    }
+
     DiscFile movie{"MOVIES/" + stem + ".STR", {}, true};
 
     static const uint8_t sync[12] = {0, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0};

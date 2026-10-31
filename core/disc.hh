@@ -148,7 +148,8 @@ constexpr size_t kMode2Sector = 2336;
 
 // `file` (made with psxavenc) as MOVIES/<STEM>.STR, in any of its layouts: -t str
 // (2336-byte sectors), -t strcd (2352, the sync and header dropped) or -t strv
-// (2048, video only, given Form 1 subheaders). The stem is upper-cased. Throws
+// (2048, video only, given Form 1 subheaders). A .sbs (psxavenc -t sbs) goes as
+// plain data, MOVIES/<STEM>.SBS, for Movie.PlayOn. The stem is upper-cased. Throws
 // std::runtime_error when the file is none of these or has no video sector.
 DiscFile loadMovie(const std::filesystem::path& file);
 
