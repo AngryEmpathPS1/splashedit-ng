@@ -96,7 +96,7 @@ static int usage() {
                  "  changes nothing here\n"
                  "usage: splashpack-cli disc <scene>... --engine <psxsplash.ps-exe> -o <out.bin> [--project <dir>]\n"
                  "    [--licence <file|psxsplash|none>] [--volume <name>] [--track <audio file>]...\n"
-                 "    [--movie <str file>]...\n"
+                 "    [--movie <str file>]... [--single-speed]\n"
                  "  builds a bootable disc image (.bin + .cue) of the scenes, numbered in the order given\n"
                  "  (the game starts in the first); the engine is a LOADER=cdrom build\n"
                  "  with --project, the volume, licence and music tracks come from <dir>/disc.json; the options\n"
@@ -111,6 +111,9 @@ static int usage() {
                  "    first); any --track replaces disc.json's list\n"
                  "  --movie adds a movie made with psxavenc (-t str, strcd or strv) as MOVIES/<NAME>.STR, which\n"
                  "    Movie.Play(\"NAME\") plays; any --movie replaces disc.json's list\n"
+                 "  --single-speed has the engine read the whole disc at single speed, for burned discs\n"
+                 "    (a laser can read a CD-R perfectly at single and badly at double); scenes load half\n"
+                 "    as fast, and movies want psxavenc -x 1 and Movie.Play(name, {speed = 1})\n"
                  "usage: splashpack-cli licence --out <file> [--tmd <file>] [--top <text>] [--bottom <text>]\n"
                  "    [--from <file|psxsplash>] [--region japan|america|europe]\n"
                  "  builds a 12-sector licence file (28032 bytes, for --licence) from a TMD logo (flat\n"
@@ -730,7 +733,7 @@ static int discCmd(int argc, char** argv) {
     std::vector<std::string> scenePaths;
     std::string outPath, project, engine, licence, volume;
     std::vector<std::string> tracks, movies;
-    bool hasLicence = false, hasVolume = false;
+    bool hasLicence = false, hasVolume = false, singleSpeed = false;
     for (int i = 2; i < argc; i++) {
         std::string a = argv[i];
         if (a == "-o" && i + 1 < argc)
@@ -741,6 +744,8 @@ static int discCmd(int argc, char** argv) {
         } else if (a == "--track" && i + 1 < argc) {
             std::u8string u = fs::absolute(fs::path(argv[++i])).u8string();
             tracks.push_back(std::string(u.begin(), u.end()));
+        } else if (a == "--single-speed") {
+            singleSpeed = true;
         } else if (a == "--movie" && i + 1 < argc) {
             std::u8string u = fs::absolute(fs::path(argv[++i])).u8string();
             movies.push_back(std::string(u.begin(), u.end()));
@@ -785,6 +790,7 @@ static int discCmd(int argc, char** argv) {
         if (hasVolume) disc.volume = volume;
         if (!tracks.empty()) disc.tracks = tracks;
         if (!movies.empty()) disc.movies = movies;
+        if (singleSpeed) disc.singleSpeed = true;
         splash::DiscResult r = splash::exportDisc(ptrs, root, engine, outPath, names.front(), names,
                                                      splash::readVramSettings(root / "vram.json"), disc);
         for (auto& m : r.exported.warnings) std::fprintf(stderr, "warning: %s\n", m.c_str());

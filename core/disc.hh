@@ -108,13 +108,17 @@ std::pair<std::string, std::string> licenceText(const std::vector<LicenceSector>
 // psxsplash-cdrom-nologo); missing or not a bool reads as true, and it is
 // written only when false. `movies` are STR files (loadMovie) in the same form
 // as tracks, written only when there are any: Movie.Play("INTRO") plays
-// intro.str. writeDiscSettings returns false when the file cannot be written.
+// intro.str. "singleSpeed": true = psxsplash reads the whole disc at single
+// speed, for burned discs (a console's laser can read a CD-R perfectly at single
+// and badly at double); written only when true. writeDiscSettings returns false
+// when the file cannot be written.
 struct DiscSettings {
     std::string volume;
     std::string licence;
     std::vector<std::string> tracks;
     std::vector<std::string> movies;
     bool bootLogo = true;
+    bool singleSpeed = false;
 };
 DiscSettings readDiscSettings(const std::filesystem::path& file);
 bool writeDiscSettings(const std::filesystem::path& file, const DiscSettings& s);

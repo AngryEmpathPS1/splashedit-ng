@@ -199,7 +199,7 @@
 {"Cutscene", "Stop", ApiKind::Function, "Cutscene.Stop() -> nil", ""},
 {"Cutscene", "IsPlaying", ApiKind::Function, "Cutscene.IsPlaying() -> boolean", ""},
 {"Movie", "", ApiKind::Table, "Movie", "psxsplash API table."},
-{"Movie", "Play", ApiKind::Function, "Movie.Play(name) or Movie.Play(name, {skip=bool, loop=bool, overlay=bool, x=n, y=n, onComplete=fn(result), thenScene=n, rgb24=bool}) -> queued", ""},
+{"Movie", "Play", ApiKind::Function, "Movie.Play(name) or Movie.Play(name, {skip=bool, loop=bool, overlay=bool, x=n, y=n, speed=1|2, onComplete=fn(result), thenScene=n, rgb24=bool}) -> queued", ""},
 {"Movie", "IsPlaying", ApiKind::Function, "Movie.IsPlaying() -> boolean", ""},
 {"Movie", "PlayOn", ApiKind::Function, "Movie.PlayOn(entity, name) or Movie.PlayOn(entity, name, {fps=n, loop=bool, onComplete=fn}) -> started", ""},
 {"Movie", "StopOn", ApiKind::Function, "Movie.StopOn() -> nil", ""},

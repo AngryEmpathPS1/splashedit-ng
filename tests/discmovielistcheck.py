@@ -87,6 +87,10 @@ check('a file that is gone says so', 'disc movies: gone.str missing' in movies, 
 check('a file that is no movie says so', 'disc movies: junk.str not a movie' in movies, movies)
 check('a name the disc cannot hold says so', 'disc movies: awfullylongname.str name too long' in movies, movies)
 
+movies, lines, data, controls = run(click('disc.singlespeed'), disc_json(['intro.str']))
+check('the single speed switch is drawn', 'disc.singlespeed' in controls, sorted(controls))
+check('the switch writes it to disc.json', (data or {}).get('singleSpeed') is True, data)
+
 if shot_out:
     check('a screenshot was saved', os.path.exists(shot_out), shot_out)
 

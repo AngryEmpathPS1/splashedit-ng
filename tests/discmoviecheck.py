@@ -30,7 +30,7 @@ def edc(data):
 
 
 engine = os.path.join(tmp, 'cd.ps-exe')
-open(engine, 'wb').write(b'PS-X EXE' + bytes(2040) + b'code' * 300 + b'SCENE%d/SCENE_%d.SPK;1\0' + bytes(100))
+open(engine, 'wb').write(b'PS-X EXE' + bytes(2040) + b'code' * 300 + b'SCENE%d/SCENE_%d.SPK;1\0psxsplash disc read speed 2\0' + bytes(100))
 
 SECTORS = 16
 VIDEO_SUB = bytes([1, 1, 0x48, 0]) * 2
@@ -137,6 +137,20 @@ check('a name the disc cannot hold is an error', r.returncode != 0 and 'disc fil
 r = subprocess.run([cli, 'disc', scene, '--engine', engine, '--movie', os.path.join(tmp, 'nothere.str'), '-o', out],
                    capture_output=True, text=True)
 check('a missing movie is an error', r.returncode != 0 and 'no such file' in r.stderr, r.stderr)
+
+check('a disc reads at double speed unless told', b'psxsplash disc read speed 2' in raw and b'psxsplash disc read speed 1' not in raw)
+slow = os.path.join(tmp, 'slow.bin')
+r = subprocess.run([cli, 'disc', scene, '--engine', engine, '--single-speed', '-o', slow], capture_output=True, text=True)
+data = open(slow, 'rb').read() if r.returncode == 0 else b''
+check('--single-speed sets the engine on the disc', b'psxsplash disc read speed 1' in data and b'psxsplash disc read speed 2' not in data, r.stderr)
+json.dump({'volume': 'MOVIES', 'licence': 'none', 'singleSpeed': True}, open(os.path.join(project, 'disc.json'), 'w'))
+r = subprocess.run([cli, 'disc', os.path.join(project, 'courtyard.scene'), '--engine', engine, '--project', project, '-o', slow],
+                   capture_output=True, text=True)
+check('disc.json singleSpeed does the same', r.returncode == 0 and b'psxsplash disc read speed 1' in open(slow, 'rb').read(), r.stderr)
+old = os.path.join(tmp, 'old.ps-exe')
+open(old, 'wb').write(b'PS-X EXE' + bytes(2040) + b'code' * 300 + b'SCENE%d/SCENE_%d.SPK;1\0' + bytes(100))
+r = subprocess.run([cli, 'disc', scene, '--engine', old, '--single-speed', '-o', out], capture_output=True, text=True)
+check('an engine with no read speed is an error', r.returncode != 0 and 'no read speed' in r.stderr and not os.path.exists(out), r.stderr)
 
 print(f'{checks - fails} of {checks} checks passed')
 sys.exit(1 if fails else 0)

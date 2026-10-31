@@ -455,6 +455,8 @@ DiscSettings readDiscSettings(const fs::path& file) {
             if (m.is_string()) s.movies.push_back(m.get<std::string>());
     auto logo = j.find("bootLogo");
     if (logo != j.end() && logo->is_boolean()) s.bootLogo = logo->get<bool>();
+    auto speed = j.find("singleSpeed");
+    if (speed != j.end() && speed->is_boolean()) s.singleSpeed = speed->get<bool>();
     return s;
 }
 
@@ -466,6 +468,7 @@ bool writeDiscSettings(const fs::path& file, const DiscSettings& s) {
     if (!s.tracks.empty()) j["tracks"] = s.tracks;  // written only when there is music
     if (!s.movies.empty()) j["movies"] = s.movies;  // and when there are movies
     if (!s.bootLogo) j["bootLogo"] = false;  // written only when it is off
+    if (s.singleSpeed) j["singleSpeed"] = true;  // and this only when it is on
     std::ofstream out(file, std::ios::binary | std::ios::trunc);
     if (!out) return false;
     out << j.dump(2) << '\n';
@@ -951,6 +954,15 @@ DiscResult exportDisc(const std::vector<const Scene*>& scenes, const fs::path& p
         } catch (const std::exception& e) {
             r.exported.errors.push_back(tag + e.what());
         }
+    }
+    // The engine reads this before it can read anything else, so it goes in the engine.
+    if (disc.singleSpeed) {
+        static const char tag[] = "psxsplash disc read speed 2";
+        auto at = std::search(exe.begin(), exe.end(), tag, tag + sizeof(tag) - 1);
+        if (at == exe.end())
+            r.exported.errors.push_back(utf8(engine.filename()) + " has no read speed to set: a psxsplash from before single speed.");
+        else
+            *(at + sizeof(tag) - 2) = '1';
     }
     if (!r.exported.errors.empty()) return r;
 

@@ -8765,6 +8765,27 @@ static void sceneInspector(State& st, ImDrawList* dl, ImRect r, float y, editor:
                 scriptLine("disclogo", std::string("disc logo: ") + (ds.bootLogo ? "on" : "off"));
         }
 
+        // Read speed: single for burned discs.
+        {
+            const ImRect br = row("ldiscspeed", "Single speed",
+                                  "For burned discs. A console's laser can read a CD-R perfectly at single speed and "
+                                  "badly at double, where movies skip and scenes can fail to load. On: the whole disc "
+                                  "reads at single speed. Scenes load half as fast, and movies want psxavenc -x 1 and "
+                                  "Movie.Play(name, {speed = 1}).");
+            const ImRect sw(ImVec2(br.Min.x, br.GetCenter().y - 8), ImVec2(br.Min.x + 30, br.GetCenter().y + 8));
+            nameRect("disc.singlespeed", sw);
+            const char* state = ds.singleSpeed ? "Reads at single speed" : "Off: reads at double speed";
+            text(dl, ImVec2(sw.Max.x + space::sm, centerY(f.regular, type::caption, br.Min.y, br.Max.y)), f.regular,
+                 type::caption, color::textFaint, state);
+            if (toggle("discspeed", sw, ds.singleSpeed) && !root.empty()) {
+                splash::DiscSettings next = ds;
+                next.singleSpeed = !ds.singleSpeed;
+                save(std::move(next));
+            }
+            if (namedRectsOn() && ImGui::GetFrameCount() > 1 && !root.empty())
+                scriptLine("discspeed", std::string("disc speed: ") + (ds.singleSpeed ? "single" : "double"));
+        }
+
         // Licence: none, the built-in psxsplash one, or a file.
         const int cur = ds.licence == "none" ? 0 : ds.licence.empty() || ds.licence == "psxsplash" ? 1 : 2;
         const std::string shown = cur == 0 ? "None" : cur == 1 ? "psxsplash" : licenceFile;
