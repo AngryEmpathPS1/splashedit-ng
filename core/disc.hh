@@ -106,12 +106,14 @@ std::pair<std::string, std::string> licenceText(const std::vector<LicenceSector>
 // a "tracks" entry that is not a string is skipped. "bootLogo": false = the
 // disc boots the psxsplash build without the boot logo (the editor picks
 // psxsplash-cdrom-nologo); missing or not a bool reads as true, and it is
-// written only when false. writeDiscSettings returns false when the file
-// cannot be written.
+// written only when false. `movies` are STR files (loadMovie) in the same form
+// as tracks, written only when there are any: Movie.Play("INTRO") plays
+// intro.str. writeDiscSettings returns false when the file cannot be written.
 struct DiscSettings {
     std::string volume;
     std::string licence;
     std::vector<std::string> tracks;
+    std::vector<std::string> movies;
     bool bootLogo = true;
 };
 DiscSettings readDiscSettings(const std::filesystem::path& file);
@@ -131,11 +133,24 @@ std::vector<LicenceSector> resolveLicence(const std::string& licence, const std:
                                           std::string& error);
 
 // A file on the disc. `path` is "NAME.EXT" or "DIR/NAME.EXT", upper case, no
-// ";1": the writer adds the version.
+// ";1": the writer adds the version. With `mode2`, `data` is whole Mode 2
+// sectors of kMode2Sector bytes, a subheader then its payload, as a movie has to
+// be for its XA audio to reach the drive: each sector is written with the
+// subheader it came with (its EDC and ECC computed here) and the directory gives
+// the file's size as 2048 bytes a sector, as mkpsxiso does.
 struct DiscFile {
     std::string path;
     std::vector<uint8_t> data;
+    bool mode2 = false;
 };
+
+constexpr size_t kMode2Sector = 2336;
+
+// `file` (made with psxavenc) as MOVIES/<STEM>.STR, in any of its layouts: -t str
+// (2336-byte sectors), -t strcd (2352, the sync and header dropped) or -t strv
+// (2048, video only, given Form 1 subheaders). The stem is upper-cased. Throws
+// std::runtime_error when the file is none of these or has no video sector.
+DiscFile loadMovie(const std::filesystem::path& file);
 
 // A CD-DA track as written: `start` is its INDEX 01 LBA (after its 150-sector
 // pregap), `sectors` its PCM sectors (the pregap not counted).
@@ -197,7 +212,9 @@ DiscInfo writeLicenceImage(const std::vector<LicenceSector>& licence, const std:
 // bad size is an error. `disc.tracks` become CD-DA tracks 2 and up (paths
 // relative to `projectRoot`, decoded with loadCdAudio); one that is missing
 // or cannot be decoded is the error "music track <N>: <why>" (N its disc
-// track number, 2 for the first). A disc longer than 74 minutes (333000
+// track number, 2 for the first). `disc.movies` go under MOVIES/ (see
+// loadMovie); one that is missing or is not a movie is the error
+// "movie <file>: <why>". A disc longer than 74 minutes (333000
 // sectors) is a warning naming its length in minutes; longer than 80
 // (360000) is an error and no image is written. Errors land in the result;
 // with more than one scene,

@@ -227,17 +227,19 @@ void encodeForm1(uint8_t* out, uint32_t lba, const uint8_t* data, uint8_t submod
 
 namespace {
 
-// A licence sector at `lba`, its subheader as the file has it.
-void encodeLicence(uint8_t* out, uint32_t lba, const LicenceSector& s) {
-    mode2Header(out, lba, s.sub);
-    if (s.sub[2] & 0x20) {
-        std::memcpy(out + 24, s.data, kForm2Data);
+// A sector at `lba` with the subheader it came with: Form 2 when sub[2] & 0x20.
+void encodeSubheader(uint8_t* out, uint32_t lba, const uint8_t* sub, const uint8_t* data) {
+    mode2Header(out, lba, sub);
+    if (sub[2] & 0x20) {
+        std::memcpy(out + 24, data, kForm2Data);
         le32(out + 24 + kForm2Data, edc(out + 16, 8 + kForm2Data));
     } else {
-        std::memcpy(out + 24, s.data, kSector);
+        std::memcpy(out + 24, data, kSector);
         finishForm1(out);
     }
 }
+
+void encodeLicence(uint8_t* out, uint32_t lba, const LicenceSector& s) { encodeSubheader(out, lba, s.sub, s.data); }
 
 const uint8_t kPsxsplashLicence[] = {
 #include "licence_psxsplash.inc"
@@ -447,6 +449,10 @@ DiscSettings readDiscSettings(const fs::path& file) {
     if (tr != j.end() && tr->is_array())
         for (const auto& t : *tr)
             if (t.is_string()) s.tracks.push_back(t.get<std::string>());
+    auto mv = j.find("movies");
+    if (mv != j.end() && mv->is_array())
+        for (const auto& m : *mv)
+            if (m.is_string()) s.movies.push_back(m.get<std::string>());
     auto logo = j.find("bootLogo");
     if (logo != j.end() && logo->is_boolean()) s.bootLogo = logo->get<bool>();
     return s;
@@ -458,6 +464,7 @@ bool writeDiscSettings(const fs::path& file, const DiscSettings& s) {
     j["volume"] = s.volume;
     j["licence"] = s.licence;
     if (!s.tracks.empty()) j["tracks"] = s.tracks;  // written only when there is music
+    if (!s.movies.empty()) j["movies"] = s.movies;  // and when there are movies
     if (!s.bootLogo) j["bootLogo"] = false;  // written only when it is off
     std::ofstream out(file, std::ios::binary | std::ios::trunc);
     if (!out) return false;
@@ -541,7 +548,8 @@ DiscInfo writeDiscImage(const std::vector<DiscFile>& files, const std::string& v
         }
         for (const Entry& e : dirs[dir].entries)
             if (e.id == name + ";1") throw std::runtime_error("Two files named " + f.path);
-        dirs[dir].entries.push_back({name + ";1", false, 0, uint32_t(f.data.size())});
+        const size_t bytes = f.mode2 ? f.data.size() / kMode2Sector * kSector : f.data.size();
+        dirs[dir].entries.push_back({name + ";1", false, 0, uint32_t(bytes)});
         placed.push_back({&f, dir, 0});
     }
     // ISO 9660 orders records by name (directories sort among the files).
@@ -692,6 +700,14 @@ DiscInfo writeDiscImage(const std::vector<DiscFile>& files, const std::string& v
     for (const Placed& p : placed) {
         const Entry& e = dirs[p.dir].entries[p.entry];
         if (lba != e.lba) throw std::runtime_error("disc layout drifted at " + p.file->path);
+        if (p.file->mode2) {
+            for (size_t off = 0; off < p.file->data.size(); off += kMode2Sector, lba++) {
+                const uint8_t* sector = p.file->data.data() + off;
+                encodeSubheader(raw, lba, sector, sector + 8);
+                out.write(reinterpret_cast<const char*>(raw), kRawSectorSize);
+            }
+            continue;
+        }
         emitRun(p.file->data.data(), p.file->data.size(),
                 std::max<uint32_t>(1, uint32_t((e.size + kSector - 1) / kSector)));
     }
@@ -734,6 +750,47 @@ DiscInfo writeDiscImage(const std::vector<DiscFile>& files, const std::string& v
     }
     if (!c) throw std::runtime_error("Cannot write " + utf8(cue));
     return info;
+}
+
+DiscFile loadMovie(const fs::path& file) {
+    const std::vector<uint8_t> in = readFile(file);
+    std::string stem = utf8(file.stem());
+    for (char& ch : stem)
+        if (ch >= 'a' && ch <= 'z') ch = char(ch - 32);
+    DiscFile movie{"MOVIES/" + stem + ".STR", {}, true};
+
+    static const uint8_t sync[12] = {0, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0};
+    static const uint8_t chunk[4] = {0x60, 0x01, 0x01, 0x80};  // the first bytes of every video sector
+    constexpr size_t kChunkAt = 8;  // past the subheader
+    size_t stride = 0, skip = 0;
+    if (in.size() >= kRawSectorSize && std::memcmp(in.data(), sync, sizeof sync) == 0) {
+        stride = kRawSectorSize;
+        skip = 16;
+    } else if (in.size() >= kSector && std::memcmp(in.data(), chunk, sizeof chunk) == 0) {
+        stride = kSector;
+    } else if (in.size() >= kMode2Sector && std::memcmp(in.data(), in.data() + 4, 4) == 0) {
+        stride = kMode2Sector;
+    }
+    if (stride == 0 || in.size() % stride != 0) throw std::runtime_error("not a psxavenc movie");
+
+    const size_t sectors = in.size() / stride;
+    movie.data.assign(sectors * kMode2Sector, 0);
+    bool video = false;
+    for (size_t s = 0; s < sectors; s++) {
+        const uint8_t* from = in.data() + s * stride;
+        uint8_t* to = movie.data.data() + s * kMode2Sector;
+        if (stride == kSector) {
+            // Video only, so no subheader to keep: realtime data, on channel 1.
+            static const uint8_t sub[8] = {1, 1, 0x48, 0, 1, 1, 0x48, 0};
+            std::memcpy(to, sub, 8);
+            std::memcpy(to + kChunkAt, from, kSector);
+        } else {
+            std::memcpy(to, from + skip, kMode2Sector);
+        }
+        video = video || std::memcmp(to + kChunkAt, chunk, sizeof chunk) == 0;
+    }
+    if (!video) throw std::runtime_error("no video in it");
+    return movie;
 }
 
 DiscInfo writeLicenceImage(const std::vector<LicenceSector>& licence, const fs::path& bin) {
@@ -808,6 +865,23 @@ DiscResult exportDisc(const std::vector<const Scene*>& scenes, const fs::path& p
             r.exported.errors.push_back(tag + e.what());
         }
     }
+    // Movies: MOVIES/<NAME>.STR, each with the subheaders it was encoded with.
+    std::vector<DiscFile> movies;
+    for (const std::string& m : disc.movies) {
+        fs::path p = fs::path(std::u8string(m.begin(), m.end()));
+        if (p.is_relative() && !projectRoot.empty()) p = projectRoot / p;
+        const std::string tag = "movie " + utf8(p.filename()) + ": ";
+        std::error_code fe;
+        if (!fs::is_regular_file(p, fe)) {
+            r.exported.errors.push_back(tag + utf8(p) + ": no such file");
+            continue;
+        }
+        try {
+            movies.push_back(loadMovie(p));
+        } catch (const std::exception& e) {
+            r.exported.errors.push_back(tag + e.what());
+        }
+    }
     if (!r.exported.errors.empty()) return r;
 
     std::error_code ec;
@@ -848,6 +922,7 @@ DiscResult exportDisc(const std::vector<const Scene*>& scenes, const fs::path& p
             // The loading screen psxsplash draws while this scene loads.
             if (fs::exists(part.replace_extension(".loading"))) files.push_back({dir + ".LDG", readFile(part)});
         }
+        for (DiscFile& m : movies) files.push_back(std::move(m));
         if (r.exported.errors.empty()) {
             // The length check needs the layout; write, then drop an over-long image.
             r.disc = writeDiscImage(files, discVolume(disc.volume, title), bin, licence, music);
@@ -856,7 +931,7 @@ DiscResult exportDisc(const std::vector<const Scene*>& scenes, const fs::path& p
             std::snprintf(len, sizeof len, "%.1f", minutes);
             if (r.disc.sectors > kDiscMaxSectors) {
                 r.exported.errors.push_back("The disc is " + std::string(len) +
-                                            " minutes long; a CD holds at most 80 minutes (remove music tracks)");
+                                            " minutes long; a CD holds at most 80 minutes (remove music tracks or movies)");
                 fs::path cue = bin;
                 cue.replace_extension(".cue");
                 fs::remove(bin, ec);
