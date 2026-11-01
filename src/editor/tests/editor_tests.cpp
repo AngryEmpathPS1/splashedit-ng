@@ -16348,6 +16348,139 @@ void testGpuDumpParse() {
     CHECK(gpudump::parse(gpdBytes({gpdPacket(0, {0x200000ff, gpdXY(1, 1)})}), d, &err) && gpudump::decode(d).incomplete);
 }
 
+// psxsplash capture tags (gpudump::PrimTag): 2 GP0(00h) words after a mesh
+// triangle's words name its object, triangle and ordering-table slot.
+uint32_t gpdTag1(unsigned kind, unsigned obj, unsigned tri) { return 0x00a00000u | kind << 18 | (obj >> 10) << 16 | tri; }
+uint32_t gpdTag2(unsigned obj, unsigned slot) { return (obj & 0x3ffu) << 14 | slot; }
+
+void testGpuTags() {
+    namespace fs = std::filesystem;
+    using gpudump::Kind;
+    // A: gouraud-textured triangle, tagged (object 1500 needs the high bits in word 1).
+    const std::vector<uint32_t> a = {0x340000ff, gpdXY(0, 0), 0x7c400010, 0x0000ff00, gpdXY(40, 0), 0x00051120, 0x000000ff, gpdXY(0, 40), 0x00003010};
+    const std::vector<uint32_t> b = {0x200000ff, gpdXY(50, 50), gpdXY(60, 50), gpdXY(50, 60)};       // B: flat, untagged
+    const std::vector<uint32_t> c = {0x3000ff00, gpdXY(5, 5), 0x00ff0000, gpdXY(25, 5), 0x000000ff, gpdXY(5, 25)};  // C: gouraud
+    std::vector<uint32_t> tagged, plain;
+    auto add = [](std::vector<uint32_t>& v, const std::vector<uint32_t>& w) { v.insert(v.end(), w.begin(), w.end()); };
+    add(tagged, a), add(tagged, {gpdTag1(0, 1500, 7), gpdTag2(1500, 300)});
+    add(tagged, b);
+    add(tagged, c), add(tagged, {gpdTag1(1, 3, 65535), gpdTag2(3, 0x3fff)});
+    add(plain, a), add(plain, b), add(plain, c);
+    const gpudump::CommandList t = gpdFrame(tagged), p = gpdFrame(plain);
+    // The tag words are no commands of their own: the same commands and primitives as without them.
+    CHECK(t.commands.size() == p.commands.size() && t.drawn == p.drawn && t.drawn.size() == 3);
+    CHECK(t.tagged == 2 && p.tagged == 0);
+    if (t.drawn.size() == 3 && p.drawn.size() == 3) {
+        const gpudump::Command& ta = t.commands[size_t(t.drawn[0])];
+        const gpudump::Command& tb = t.commands[size_t(t.drawn[1])];
+        const gpudump::Command& tc = t.commands[size_t(t.drawn[2])];
+        CHECK(ta.tag.present && ta.tag.kind == gpudump::kTagMain && ta.tag.obj == 1500 && ta.tag.tri == 7 && ta.tag.slot == 300);
+        CHECK(ta.words.size() == 9 && ta.words == a);  // the tag is not in the polygon's words
+        CHECK(!tb.tag.present);
+        CHECK(tc.tag.present && tc.tag.kind == gpudump::kTagFog && tc.tag.obj == 3 && tc.tag.tri == 65535 &&
+              tc.tag.slot == gpudump::kTagNoSlot);
+        for (int i = 0; i < 3; ++i) CHECK(!p.commands[size_t(p.drawn[size_t(i)])].tag.present);
+        CHECK(gpudump::tagText(ta.tag, nullptr) == "object (#1500), triangle 7, OT slot 300");
+        CHECK(gpudump::tagText(tc.tag, nullptr) == "object (#3), triangle 65535, OT slot ?, fog pass");
+        CHECK(gpudump::tagText(tb.tag, nullptr).empty());
+    }
+    // And they draw the same.
+    CHECK(gpdRender(tagged).vram == gpdRender(plain).vram);
+    // An untagged stream decodes as before: a plain NOP stays a NOP command.
+    {
+        const gpudump::CommandList n = gpdFrame({0x00000000, 0x200000ff, gpdXY(1, 1), gpdXY(9, 1), gpdXY(1, 9), 0x00123456});
+        CHECK(n.commands.size() >= 3 && n.drawn.size() == 1 && n.tagged == 0);
+        int nops = 0;
+        for (const gpudump::Command& cmd : n.commands) nops += cmd.live && cmd.kind == Kind::Nop;
+        CHECK(nops == 2);
+    }
+    // Broken pairs are left alone: word 1 then a fill (no word 2), a stray word 2, a tag after a
+    // rectangle (not a mesh triangle), a second tag after a tagged triangle. Each word stays a NOP.
+    {
+        std::vector<uint32_t> s;
+        add(s, b), add(s, {gpdTag1(0, 9, 9)}), add(s, {0x02000000, gpdXY(0, 100), gpdXY(16, 4)});  // B, lone word 1, fill
+        add(s, {gpdTag2(4, 4)});                                                                  // stray word 2
+        add(s, {0x60ffffff, gpdXY(70, 70), gpdXY(4, 4), gpdTag1(0, 5, 5), gpdTag2(5, 5)});         // rect + tag
+        add(s, c), add(s, {gpdTag1(0, 2, 11), gpdTag2(2, 12), gpdTag1(0, 8, 8), gpdTag2(8, 8)});   // C + 2 tags
+        add(s, b), add(s, {gpdTag1(0, 6, 6)});                                                    // B + word 1 at the end
+        const gpudump::CommandList l = gpdFrame(s);
+        CHECK(l.drawn.size() == 5 && l.tagged == 1);
+        int nops = 0;
+        for (const gpudump::Command& cmd : l.commands) nops += cmd.live && cmd.kind == Kind::Nop;
+        CHECK(nops == 7);
+        if (l.drawn.size() == 5) {
+            CHECK(!l.commands[size_t(l.drawn[0])].tag.present);
+            CHECK(l.commands[size_t(l.drawn[1])].kind == Kind::Fill && !l.commands[size_t(l.drawn[1])].tag.present);
+            CHECK(l.commands[size_t(l.drawn[2])].kind == Kind::Rect && !l.commands[size_t(l.drawn[2])].tag.present);
+            const gpudump::PrimTag& tc = l.commands[size_t(l.drawn[3])].tag;
+            CHECK(tc.present && tc.obj == 2 && tc.tri == 11 && tc.slot == 12);
+            CHECK(!l.commands[size_t(l.drawn[4])].tag.present);
+        }
+    }
+    // A pair split across GP0 packets still pairs; a GP1 word between them breaks it.
+    {
+        std::vector<uint32_t> first = b;
+        first.push_back(gpdTag1(0, 1, 2));
+        auto decodeWith = [&](std::vector<std::vector<uint32_t>> mid) {
+            std::vector<std::vector<uint32_t>> pk = {gpdPacket(1, {0}), gpdPacket(5, {}), gpdPacket(0, first)};
+            pk.insert(pk.end(), mid.begin(), mid.end());
+            pk.push_back(gpdPacket(0, {gpdTag2(1, 3)}));
+            gpudump::Dump d;
+            std::string err;
+            CHECK(gpudump::parse(gpdBytes(pk), d, &err));
+            return gpudump::decode(d);
+        };
+        const gpudump::CommandList joined = decodeWith({}), broken = decodeWith({gpdPacket(1, {0x05000000})});
+        CHECK(joined.tagged == 1 && joined.drawn.size() == 1 && joined.commands[size_t(joined.drawn[0])].tag.slot == 3);
+        CHECK(broken.tagged == 0 && broken.drawn.size() == 1 && !broken.commands[size_t(broken.drawn[0])].tag.present);
+    }
+
+    // Names: the object table and name table of an exported pack.
+    const fs::path project = fs::path(SPLASHEDIT_SOURCE_DIR) / "examples" / "courtyard";
+    const fs::path dir = g_outDir / "gputags";
+    fs::remove_all(dir);
+    fs::create_directories(dir);
+    const splash::Scene sc = splash::loadScene(project / "courtyard.scene");
+    const splash::ExportResult r = splash::exportSplashpack(sc, project, dir / "scene_0.splashpack");
+    CHECK(r.ok());
+    gpudump::TagScene scene;
+    std::string err;
+    CHECK(gpudump::loadTagScene(dir / "scene_0.splashpack", scene, &err));
+    CHECK(int(scene.objects.size()) == r.stats.gameObjects && scene.objects.size() >= 2);
+    int tris = 0, floorObj = -1;
+    for (size_t i = 0; i < scene.objects.size(); ++i) {
+        tris += scene.objects[i].triangles;
+        CHECK(scene.objects[i].looks.size() == scene.objects[i].triangles);
+        if (scene.objects[i].name == "Floor") floorObj = int(i);
+    }
+    CHECK(tris == r.stats.triangles && floorObj >= 0);
+    CHECK(!gpudump::parseTagScene({'S', 'P', 0}, scene, &err) && !err.empty());
+    if (floorObj >= 0) {
+        CHECK(gpudump::loadTagScene(dir / "scene_0.splashpack", scene, &err));
+        const gpudump::TagScene::Object& fo = scene.objects[size_t(floorObj)];
+        // A textured triangle with the floorObj's triangle 0 CLUT and page, tagged as it.
+        const uint32_t look = fo.looks.empty() ? 0 : fo.looks[0];
+        const std::vector<uint32_t> tri = {0x24808080, gpdXY(0, 0), (look & 0xffff0000u) | 0x0000, gpdXY(8, 0), (look & 0x19f) << 16, gpdXY(0, 8), 0};
+        std::vector<uint32_t> s = tri;
+        add(s, {gpdTag1(0, unsigned(floorObj), 0), gpdTag2(unsigned(floorObj), 40)});
+        const gpudump::CommandList l = gpdFrame(s);
+        CHECK(l.tagged == 1);
+        CHECK(gpudump::matchTagScene(l, {scene}) == 0);
+        if (l.tagged == 1)
+            CHECK(gpudump::tagText(l.commands[size_t(l.drawn[0])].tag, &scene) ==
+                  "object Floor (#" + std::to_string(floorObj) + "), triangle 0, OT slot 40");
+        // Two equally good packs: no answer. A pack the triangle index does not fit: not that one.
+        CHECK(gpudump::matchTagScene(l, {scene, scene}) == -1);
+        gpudump::TagScene shortPack = scene;
+        shortPack.objects[size_t(floorObj)].triangles = 0;
+        shortPack.objects[size_t(floorObj)].looks.clear();
+        CHECK(gpudump::matchTagScene(l, {shortPack}) == -1 && gpudump::matchTagScene(l, {shortPack, scene}) == 1);
+        gpudump::TagScene few = scene;
+        few.objects.resize(size_t(floorObj));
+        CHECK(gpudump::matchTagScene(l, {few}) == -1);
+    }
+}
+
 void testGpuDecode() {
     using gpudump::Kind;
     const std::vector<uint32_t> frame = {
@@ -18659,6 +18792,7 @@ int main(int argc, char** argv) {
     testUnityUi();
     testGpuDumpParse();
     testGpuDecode();
+    testGpuTags();
     testGpuRaster();
     testShadows();
     testListScroll();
