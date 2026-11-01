@@ -98,6 +98,31 @@ struct Vertex {
     uint8_t u = 0, v = 0;
 };
 
+// A psxsplash capture tag (psxsplash src/capturetag.hh): two GP0(00h) NOP
+// words the engine appends to a mesh triangle's packet when the frame
+// debugger switches tagging on. Word 1 is 0x00A00000 | kind << 18 |
+// (obj >> 10) << 16 | tri, word 2 is (obj & 0x3ff) << 14 | slot.
+struct PrimTag {
+    bool present = false;
+    uint8_t kind = 0;   // kTagMain or kTagFog
+    uint16_t obj = 0;   // game object index in the splashpack, kTagNoObject when it did not fit
+    uint16_t tri = 0;   // triangle index in that object's list (the unsplit source triangle)
+    uint16_t slot = 0;  // ordering-table bucket, kTagNoSlot when it did not fit
+};
+constexpr uint8_t kTagMain = 0, kTagFog = 1;
+constexpr uint16_t kTagNoObject = 0xfff, kTagNoSlot = 0x3fff;
+// Word 1 of a tag: a GP0(00h) with bits 23-20 = 0xA.
+inline bool isTagWord1(uint32_t w) { return (w & 0xfff00000u) == 0x00a00000u; }
+inline PrimTag tagOf(uint32_t w1, uint32_t w2) {
+    PrimTag t;
+    t.present = true;
+    t.kind = uint8_t((w1 >> 18) & 3);
+    t.obj = uint16_t(((w1 >> 16) & 3) << 10 | ((w2 >> 14) & 0x3ff));
+    t.tri = uint16_t(w1 & 0xffff);
+    t.slot = uint16_t(w2 & 0x3fff);
+    return t;
+}
+
 struct Command {
     Kind kind = Kind::Nop;
     uint32_t op = 0;               // the first word (for Gp1, the GP1 word)
@@ -111,6 +136,9 @@ struct Command {
     uint16_t clut = 0;              // textured: CLUT attribute
     int width = 0, height = 0;      // rects, fills, copies (masked as the GPU masks them)
     int srcX = 0, srcY = 0, dstX = 0, dstY = 0;  // fills and copies (dst only for fills and CopyIn)
+    // Polygons: the capture tag that followed it in the stream (its two words
+    // are not commands of their own).
+    PrimTag tag;
 
     bool textured() const { return (kind == Kind::Polygon || kind == Kind::Rect) && (op >> 26 & 1); }
     bool raw() const { return textured() && (op >> 24 & 1); }
@@ -134,9 +162,36 @@ struct CommandList {
     std::vector<int> drawn;  // indices of the live commands that draw, in order: the primitives stepped through
     int frames = 0;          // VSync packets after TraceBegin
     bool incomplete = false; // the dump ends inside a GP0 command (dropped)
+    int tagged = 0;          // polygons carrying a capture tag
 };
 
 // Decodes the GP0 and GP1 traffic of `dump` in order.
 CommandList decode(const Dump& dump);
+
+// What a capture tag's object and triangle indices refer to: the game objects
+// of the splashpack the captured scene was loaded from (Play writes
+// scene_<i>.splashpack into its directory), read from the object table and
+// the object name table (docs/splashpack-format.md 2.2, 2.13).
+struct TagScene {
+    struct Object {
+        std::string name;        // as the pack stores it (24 UTF-16 units at most)
+        uint16_t triangles = 0;  // 0 for an object whose geometry streams (.geo)
+        bool streamed = false;
+        std::vector<uint32_t> looks;  // per triangle: clut << 16 | (tpage & 0x19f)
+    };
+    std::filesystem::path pack;
+    std::vector<Object> objects;
+};
+bool parseTagScene(const std::vector<uint8_t>& bytes, TagScene& out, std::string* error);
+bool loadTagScene(const std::filesystem::path& pack, TagScene& out, std::string* error);
+// Which of `scenes` the tagged polygons of `list` came from: every tag's
+// object (and, for objects in the pack, triangle) in range, and the most
+// textured triangles whose CLUT and texture page match the tagged one. -1
+// when none fits, or several fit equally well.
+int matchTagScene(const CommandList& list, const std::vector<TagScene>& scenes);
+// "object <name> (#obj), triangle <tri>, OT slot <slot>" plus ", fog pass";
+// `scene` null (or the index past its objects) leaves the name out. Empty
+// for an untagged command.
+std::string tagText(const PrimTag& tag, const TagScene* scene);
 
 }  // namespace gpudump
