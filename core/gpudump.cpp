@@ -479,6 +479,9 @@ bool parseTagScene(const std::vector<uint8_t>& b, TagScene& out, std::string* er
     };
     if (b.size() < 64 || b[0] != 'S' || b[1] != 'P') return bad("not a splashpack");
     const uint32_t version = rd16(b, 2), luaFiles = rd16(b, 4), objects = rd16(b, 6);
+    // The exporter writes v27/v28 (core/splashpack.cpp, header). A newer version may
+    // grow the header, so it is refused rather than misread: bump this with it.
+    if (version > 28) return bad("splashpack version newer than this reader");
     // splashpackHeaderSize (docs/splashpack-format.md, header).
     const size_t header = version >= 28 ? 160 : version >= 25 ? 156 : version >= 24 ? 148 : version >= 22 ? 144 : version >= 21 ? 128 : 120;
     const size_t table = header + 8 * size_t(luaFiles);
