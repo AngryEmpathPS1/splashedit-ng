@@ -150,14 +150,16 @@ FontSheet fromBitmap(const UIFont& f, const std::filesystem::path& file) {
             s.texels[size_t(y) * kSheetW + x] = img.pixels[size_t(img.height - 1 - y) * kSheetW + x].a > 0.5f;
     if (!f.advances.empty()) {
         for (int i = 0; i < 96; i++) s.advances[size_t(i)] = uint8_t(std::clamp(f.advances[size_t(i)], 1, 255));
+    } else if (f.monospace) {
+        s.advances.fill(uint8_t(std::clamp(s.glyphWidth, 1, 255)));
     } else {
-        // Ink width plus one column of spacing; space is half a cell.
+        // Ink width plus `gap` columns of spacing; space is half a cell.
         for (int i = 0; i < kGlyphs; i++) {
             int last = -1;
             for (int y = 0; y < s.glyphHeight; y++)
                 for (int x = 0; x < s.glyphWidth; x++)
                     if (s.texels[size_t(cellY(s, i) + y) * kSheetW + cellX(s, i) + x]) last = std::max(last, x);
-            s.advances[size_t(i)] = uint8_t(last < 0 ? std::max(1, (s.glyphWidth + 1) / 2) : std::min(last + 2, 255));
+            s.advances[size_t(i)] = uint8_t(last < 0 ? std::max(1, (s.glyphWidth + 1) / 2) : std::clamp(last + 1 + f.gap, 1, 255));
         }
         s.advances[95] = uint8_t(s.glyphWidth);
     }

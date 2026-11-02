@@ -10867,6 +10867,123 @@ void testUiFonts() {
     CHECK(std::count(px.begin(), px.end(), 0xffffffffu) > 10);
 }
 
+// Bitmap font spacing (#310): without explicit advances, each character
+// advances by its ink plus `gap` columns, or by a full cell when monospace;
+// advances given in the scene win over both. The scene file keeps the two
+// only when they differ from the defaults, and the editor's sheet cache
+// rebuilds when either changes.
+void testUiFontSpacing() {
+    namespace fs = std::filesystem;
+    const fs::path dir = g_outDir / "fontspacing";
+    fs::remove_all(dir);
+    fs::create_directories(dir);
+    // 8x8 cells, 32 a row: glyph i inks columns 0..i%7 of its third row,
+    // except 0 (space) and 5, which are empty.
+    auto inked = [](int i) { return i != 0 && i != 5; };
+    splash::Image img;
+    img.width = 256, img.height = 24;
+    img.pixels.assign(size_t(256) * 24, splash::Image::Px{0, 0, 0, 0});
+    for (int i = 0; i < 95; i++)
+        if (inked(i))
+            for (int x = 0; x <= i % 7; x++) {
+                const int px = (i % 32) * 8 + x, py = (i / 32) * 8 + 2;
+                img.pixels[size_t(23 - py) * 256 + px] = splash::Image::Px{1, 1, 1, 1};  // rows are bottom-up
+            }
+    splash::savePng(img, dir / "font.png");
+    splash::UIFont uf;
+    uf.name = "bm";
+    uf.bitmap = "font.png";
+    uf.glyphWidth = 8;
+    uf.glyphHeight = 8;
+    CHECK(!uf.monospace && uf.gap == 1);
+    auto advances = [&](const splash::UIFont& f) { return splash::buildFont(f, dir).advances; };
+    // Gap 1, the default: the measurement as it was, ink plus one, empty half a cell.
+    const std::array<uint8_t, 96> one = advances(uf);
+    bool same = true;
+    for (int i = 0; i < 95; i++) same = same && one[size_t(i)] == (inked(i) ? i % 7 + 2 : 4);
+    CHECK(same && one[95] == 8);
+    // Gap 0: each inked character one narrower; gap 3: two wider. Empty cells and 0x7F keep theirs.
+    splash::UIFont g0 = uf, g3 = uf;
+    g0.gap = 0;
+    g3.gap = 3;
+    const std::array<uint8_t, 96> zero = advances(g0), three = advances(g3);
+    bool less = true, more = true;
+    for (int i = 0; i < 95; i++) {
+        less = less && zero[size_t(i)] == (inked(i) ? one[size_t(i)] - 1 : one[size_t(i)]);
+        more = more && three[size_t(i)] == (inked(i) ? one[size_t(i)] + 2 : one[size_t(i)]);
+    }
+    CHECK(less && zero[95] == 8);
+    CHECK(more && three[95] == 8);
+    // Monospace: every advance the cell width, whatever the gap.
+    splash::UIFont mono = g3;
+    mono.monospace = true;
+    const std::array<uint8_t, 96> m = advances(mono);
+    CHECK(std::all_of(m.begin(), m.end(), [](uint8_t a) { return a == 8; }));
+    // Explicit advances override both.
+    splash::UIFont given = mono;
+    given.gap = 0;
+    given.advances.assign(96, 5);
+    const std::array<uint8_t, 96> gv = advances(given);
+    CHECK(std::all_of(gv.begin(), gv.end(), [](uint8_t a) { return a == 5; }));
+    given.monospace = false;
+    CHECK(advances(given) == gv);
+
+    // The scene file: defaults left out, others kept and read back.
+    auto slurp = [](const fs::path& f) {
+        std::ifstream in(f, std::ios::binary);
+        return std::string((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    };
+    splash::Scene sc;
+    sc.fonts.push_back(uf);
+    splash::saveScene(sc, dir / "plain.scene");
+    const std::string plain = slurp(dir / "plain.scene");
+    CHECK(plain.find("monospace") == std::string::npos && plain.find("\"gap\"") == std::string::npos);
+    const splash::Scene pb = splash::loadScene(dir / "plain.scene");
+    CHECK(pb.fonts.size() == 1 && !pb.fonts[0].monospace && pb.fonts[0].gap == 1 && pb.fonts[0].extra.empty());
+    splash::saveScene(pb, dir / "plain2.scene");
+    CHECK(slurp(dir / "plain2.scene") == plain);
+    sc.fonts[0].monospace = true;
+    sc.fonts[0].gap = 0;
+    splash::saveScene(sc, dir / "set.scene");
+    const std::string set = slurp(dir / "set.scene");
+    CHECK(set.find("\"monospace\": true") != std::string::npos && set.find("\"gap\": 0") != std::string::npos);
+    const splash::Scene sb = splash::loadScene(dir / "set.scene");
+    CHECK(sb.fonts.size() == 1 && sb.fonts[0].monospace && sb.fonts[0].gap == 0 && sb.fonts[0].extra.empty());
+    sc.fonts[0].monospace = false;
+    sc.fonts[0].gap = 16;
+    splash::saveScene(sc, dir / "wide.scene");
+    CHECK(splash::loadScene(dir / "wide.scene").fonts[0].gap == 16);
+    // A gap outside 0..16 is refused.
+    {
+        std::string text = slurp(dir / "wide.scene");
+        const size_t at = text.find("\"gap\": 16");
+        CHECK(at != std::string::npos);
+        if (at != std::string::npos) text.replace(at, std::strlen("\"gap\": 16"), "\"gap\": 17");
+        std::ofstream(dir / "bad.scene", std::ios::binary) << text;
+        std::string why;
+        try {
+            splash::loadScene(dir / "bad.scene");
+        } catch (const std::exception& e) {
+            why = e.what();
+        }
+        CHECK(why.find("gap must be 0..16") != std::string::npos);
+    }
+
+    // The editor's sheet follows a change to either.
+    editor::uic::Assets assets;
+    assets.refresh(dir, 0);
+    splash::Scene es;
+    es.fonts.push_back(uf);
+    const splash::FontSheet* a = assets.font(es, "bm");
+    CHECK(a && a->advances == one);
+    es.fonts[0].gap = 3;
+    a = assets.font(es, "bm");
+    CHECK(a && a->advances == three);
+    es.fonts[0].monospace = true;
+    a = assets.font(es, "bm");
+    CHECK(a && a->advances == m);
+}
+
 // A canvas's default font (PSXCanvas.defaultFont): the scene file keeps it
 // (null for the system font, never in the extras); a text element without a
 // font of its own resolves to it; font rename and delete rewrite it in the
@@ -18592,6 +18709,7 @@ int main(int argc, char** argv) {
     testUiLoadingRename();
     testUiFonts();
     testUiCanvasDefaultFont();
+    testUiFontSpacing();
     testUiClipboard();
     testUiMultiSelect();
     testUiProblems();

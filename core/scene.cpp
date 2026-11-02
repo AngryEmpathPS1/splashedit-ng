@@ -680,6 +680,8 @@ json writeFont(const UIFont& fo) {
         j["bitmap"] = fo.bitmap;
         j["glyphWidth"] = fo.glyphWidth;
         j["glyphHeight"] = fo.glyphHeight;
+        if (fo.monospace) j["monospace"] = true;
+        if (fo.gap != 1) j["gap"] = fo.gap;
         if (!fo.advances.empty()) j["advances"] = fo.advances;
     } else {
         j["source"] = fo.source;
@@ -697,11 +699,14 @@ UIFont readFont(const json& j) {
     fo.bitmap = j.value("bitmap", "");
     fo.glyphWidth = j.value("glyphWidth", fo.glyphWidth);
     fo.glyphHeight = j.value("glyphHeight", fo.glyphHeight);
+    fo.monospace = j.value("monospace", fo.monospace);
+    fo.gap = j.value("gap", fo.gap);
     if (j.contains("advances")) fo.advances = j["advances"].get<std::vector<int>>();
     if (fo.source.empty() == fo.bitmap.empty()) fail("font '" + fo.name + "': set exactly one of source and bitmap");
     if (!fo.source.empty() && (fo.size < 4 || fo.size > 64)) fail("font '" + fo.name + "': size must be 4..64");
     if (!fo.bitmap.empty() && (fo.glyphWidth < 1 || fo.glyphWidth > 64 || fo.glyphHeight < 1 || fo.glyphHeight > 64))
         fail("font '" + fo.name + "': glyphWidth and glyphHeight must be 1..64");
+    if (fo.gap < 0 || fo.gap > 16) fail("font '" + fo.name + "': gap must be 0..16");
     if (!fo.advances.empty() && fo.advances.size() != 96) fail("font '" + fo.name + "': advances needs 96 entries");
     fo.extra = extrasOf(j, writeFont(fo));
     return fo;
