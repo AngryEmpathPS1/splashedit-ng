@@ -121,7 +121,8 @@ void commit(Document& doc, std::vector<UICanvas> after, Document::UiSelection se
 
 bool sameFont(const splash::UIFont& a, const splash::UIFont& b) {
     return a.name == b.name && a.source == b.source && a.size == b.size && a.bitmap == b.bitmap && a.glyphWidth == b.glyphWidth &&
-           a.glyphHeight == b.glyphHeight && a.advances == b.advances && a.extra == b.extra;
+           a.glyphHeight == b.glyphHeight && a.monospace == b.monospace && a.gap == b.gap && a.advances == b.advances &&
+           a.extra == b.extra;
 }
 
 bool validCanvas(const Document& doc, int c) { return c >= 0 && c < int(doc.scene().canvases.size()); }
@@ -1209,7 +1210,7 @@ const splash::FontSheet* Assets::font(const splash::Scene& scene, const std::str
         return nullptr;
     }
     std::string key = def->source + "|" + std::to_string(def->size) + "|" + def->bitmap + "|" + std::to_string(def->glyphWidth) +
-                      "x" + std::to_string(def->glyphHeight);
+                      "x" + std::to_string(def->glyphHeight) + (def->monospace ? "|m" : "|g" + std::to_string(def->gap));
     for (int a : def->advances) key += "," + std::to_string(a);
     std::unique_ptr<Font>& slot = m_fonts[name];
     if (!slot || slot->key != key) {

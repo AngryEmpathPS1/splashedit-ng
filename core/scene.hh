@@ -426,6 +426,10 @@ struct UIFont {
     int size = 16;       // pixels per em
     std::string bitmap;  // project-relative PNG
     int glyphWidth = 8, glyphHeight = 16;  // bitmap cells
+    // Bitmap fonts without `advances`: every glyph a full cell wide, or else
+    // each one's ink plus `gap` columns (0..16) of spacing.
+    bool monospace = false;
+    int gap = 1;
     // Bitmap fonts: per-character advance (0x20..0x7F). Empty = measured from
     // each cell's ink.
     std::vector<int> advances;
