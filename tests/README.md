@@ -1007,6 +1007,14 @@ clicks the inspector's Import settings Convert units toggle off: the sidecar mus
 
     python3 importunitscheck.py <splashedit> [screenshot.png]
 
+`pivotcheck.py` drops a glTF cube whose node is moved, turned and scaled on the courtyard example's
+viewport and uses the inspector's Import settings Pivot row: the row must be on for the mesh the cube
+draws, Bottom centre must leave that mesh file on its origin (lowest y 0, x and z centred) with the
+pivot kept in the sidecar, and Custom must open the x/y/z row without changing anything yet (CI runs it
+under `xvfb-run` on Linux).
+
+    python3 pivotcheck.py <splashedit> [screenshot.png]
+
 `timelineeditcheck.py` checks the Timeline's edits beyond keys on copies of the courtyard example
 with two cutscenes: renaming one in the scene inspector (double-click the name) and from the
 timeline's sequence picker, undo of a rename, a taken name and a 25-character one refused, the

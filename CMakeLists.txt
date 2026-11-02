@@ -97,6 +97,7 @@ add_library(splasheditdoc STATIC
     src/editor/gizmo.cpp
     src/editor/live_export.cpp
     src/editor/meter_fixes.cpp
+    src/editor/pivot.cpp
     src/editor/lua_editor.cpp
     src/editor/play.cpp
     src/editor/linkplay.cpp

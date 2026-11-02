@@ -70,6 +70,7 @@
 #include "path.hh"
 #include "strings.hh"
 #include "simplify.hh"
+#include "editor/pivot.hh"
 #include "editor/ui_canvas.hh"
 #include "ui/dialog_gate.hh"
 #include "ui/window_chrome.hh"
@@ -4076,6 +4077,261 @@ void testPlaceModel() {
     size_t before = doc.historySize();
     p = editor::placeModel(doc, outside / "junk.glb", std::nullopt, {3}, {0, 0, 0});
     CHECK(!p.error.empty() && doc.historySize() == before && !fs::exists(proj / "models" / "junk.glb"));
+}
+
+// #311 half 2: Set pivot. A new origin for the mesh an object draws moves
+// nothing: not the object, not another copy of the model, not a child; undo
+// and redo swap the files and the transforms together, importing again keeps
+// it, Merge meshes swapping the mesh keeps it, and a mesh it cannot keep (no
+// sidecar, skinned) or a zero move is refused with nothing written.
+void testSetPivot() {
+    namespace fs = std::filesystem;
+    std::error_code ec;
+    fs::path dir = g_outDir / "setpivot";
+    fs::remove_all(dir, ec);
+    fs::path proj = dir / "game", outside = dir / "downloads";
+    fs::create_directories(proj, ec);
+    fs::create_directories(outside, ec);
+    // Cube: moved 5 along X and 1 up, turned 90 degrees about Y, scaled 2
+    // along X, drawing the triangle (0,0,0) (1,0,0) (0,1,0).
+    std::ofstream(outside / "cube.gltf") << R"({"asset":{"version":"2.0"},"scene":0,"scenes":[{"nodes":[0]}],
+"nodes":[{"name":"Cube","mesh":0,"translation":[5,1,0],"rotation":[0,0.70710678,0,0.70710678],"scale":[2,1,1]}],
+"meshes":[{"primitives":[{"attributes":{"POSITION":0}}]}],
+"accessors":[{"bufferView":0,"componentType":5126,"count":3,"type":"VEC3","min":[0,0,0],"max":[1,1,0]}],
+"bufferViews":[{"buffer":0,"byteLength":36}],
+"buffers":[{"byteLength":36,"uri":"data:application/octet-stream;base64,AAAAAAAAAAAAAAAAAACAPwAAAAAAAAAAAAAAAAAAgD8AAAAA"}]})";
+    // Robot: Body (moved, turned about Z, scaled 1 x 2 x 1) holding Arm
+    // (moved, turned about Y), each drawing the same triangle.
+    std::ofstream(outside / "robot.gltf") << R"({"asset":{"version":"2.0"},"scene":0,"scenes":[{"nodes":[0]}],
+"nodes":[{"name":"Body","mesh":0,"translation":[1,0,0],"rotation":[0,0,0.38268343,0.92387953],"scale":[1,2,1],"children":[1]},
+ {"name":"Arm","mesh":0,"translation":[0.5,1,2],"rotation":[0,0.70710678,0,0.70710678]}],
+"meshes":[{"primitives":[{"attributes":{"POSITION":0}}]}],
+"accessors":[{"bufferView":0,"componentType":5126,"count":3,"type":"VEC3","min":[0,0,0],"max":[1,1,0]}],
+"bufferViews":[{"buffer":0,"byteLength":36}],
+"buffers":[{"byteLength":36,"uri":"data:application/octet-stream;base64,AAAAAAAAAAAAAAAAAACAPwAAAAAAAAAAAAAAAAAAgD8AAAAA"}]})";
+    std::ofstream(outside / "tri.obj") << "v 0 0 0\nv 2 0 0\nv 0 1 4\nf 1 2 3\n";
+    const fs::path cube = proj / "models" / "cube.gltf", side = splash::importSettingsPath(cube);
+    const std::string node = "models/cube/Cube.mesh", baked = "models/cube.mesh";
+    editor::Document doc;
+    doc.reset(splash::Scene{}, proj, "game");
+    auto bytes = [](const fs::path& f) {
+        std::ifstream in(f, std::ios::binary);
+        return std::string(std::istreambuf_iterator<char>(in), {});
+    };
+    // Where an object's mesh (and, with `kids`, its children) is in the world.
+    auto world = [&](const editor::ObjectPath& path, bool kids = false) {
+        std::vector<splash::Vec3> out;
+        const splash::Object* o = doc.object(path);
+        if (!o) return out;
+        std::vector<splash::FlatObject> flat = splash::flatten(doc.scene());
+        for (const splash::FlatObject& fo : flat)
+            if (fo.object == o && o->mesh)
+                for (const splash::Vec3& v : splash::loadMesh(proj / o->mesh->mesh).positions) out.push_back(fo.localToWorld.point(v));
+        for (size_t c = 0; kids && c < o->children.size(); ++c)
+            for (const splash::FlatObject& fo : flat)
+                if (fo.object == &o->children[c]) out.push_back(fo.worldPosition);
+        return out;
+    };
+    auto same = [](const std::vector<splash::Vec3>& a, const std::vector<splash::Vec3>& b) {
+        bool ok = !a.empty() && a.size() == b.size();
+        for (size_t i = 0; ok && i < a.size(); ++i) ok = nearV(a[i], b[i], 1e-4f);
+        if (!ok)
+            for (size_t i = 0; i < a.size() && i < b.size(); ++i)
+                std::fprintf(stderr, "  %zu: (%g %g %g) vs (%g %g %g)\n", i, a[i].x, a[i].y, a[i].z, b[i].x, b[i].y, b[i].z);
+        return ok;
+    };
+    auto bounds = [&](const std::string& mesh) { return splash::loadMesh(proj / mesh).bounds(); };
+    auto sameTransform = [](const splash::Transform& a, const splash::Transform& b) {
+        return a.position == b.position && a.scale == b.scale && a.rotation.x == b.rotation.x && a.rotation.y == b.rotation.y &&
+               a.rotation.z == b.rotation.z && a.rotation.w == b.rotation.w;
+    };
+    auto pivotOf = [&](const fs::path& model, const std::string& mesh) -> std::optional<splash::Vec3> {
+        splash::ImportSettings s = splash::loadImportSettings(model);
+        auto it = s.pivots.find(mesh);
+        if (it == s.pivots.end()) return std::nullopt;
+        return it->second;
+    };
+
+    // The sidecar keeps pivots, and writes the key only with one.
+    {
+        const fs::path m = proj / "models" / "probe.gltf";
+        fs::create_directories(m.parent_path(), ec);
+        splash::ImportSettings s;
+        splash::saveImportSettings(m, s);
+        CHECK(bytes(splash::importSettingsPath(m)).find("pivots") == std::string::npos);
+        s.pivots["models/probe.mesh"] = {0.5f, -1.25f, 3};
+        s.pivots["models/probe/Leg.mesh"] = {0, 2, 0};
+        splash::saveImportSettings(m, s);
+        splash::ImportSettings back = splash::loadImportSettings(m);
+        CHECK(back.pivots.size() == 2 && back.pivots["models/probe.mesh"] == splash::Vec3({0.5f, -1.25f, 3}) &&
+              back.pivots["models/probe/Leg.mesh"] == splash::Vec3({0, 2, 0}) && back.extra.empty());
+        std::ofstream(splash::importSettingsPath(m)) << R"({"pivots": {"models/probe.mesh": [1, 2]}})";
+        bool threw = false;
+        try {
+            splash::loadImportSettings(m);
+        } catch (const std::exception& e) {
+            threw = std::string(e.what()).find("probe.gltf.import.json") != std::string::npos;
+        }
+        CHECK(threw);
+        fs::remove(splash::importSettingsPath(m), ec);
+    }
+
+    // (a) The one-node cube, twice, the first holding a lamp; Bottom centre on the first.
+    CHECK(editor::placeModel(doc, outside / "cube.gltf", std::nullopt, {0}, {4, 5, 6}).error.empty());
+    CHECK(editor::placeModel(doc, cube, std::nullopt, {1}, {-3, 0, 2}).error.empty());
+    doc.edit({1}, [](splash::Object& o) { o.transform.rotation = {0, 0, 0.38268343f, 0.92387953f}; });
+    splash::Object lamp = named("Lamp");
+    lamp.transform.position = {0, 2, 0.5f};
+    doc.insertObject({0, 0}, lamp);
+    CHECK(doc.object({0}) && doc.object({0})->mesh && doc.object({0})->mesh->mesh == node);
+    CHECK(doc.object({1}) && doc.object({1})->mesh && doc.object({1})->mesh->mesh == node);
+    const std::vector<splash::Vec3> w0 = world({0}, true), w1 = world({1});
+    const splash::Transform t0 = doc.object({0})->transform, t1 = doc.object({1})->transform,
+                            tl = doc.object({0, 0})->transform;
+    const std::string meshBefore = bytes(proj / node), sideBefore = bytes(side);
+    const size_t steps = doc.historySize();
+    std::string err;
+    CHECK(editor::pivotBlocker(doc, {0}).empty());
+    CHECK(editor::setPivot(doc, {0}, editor::PivotMode::BottomCentre, {}, &err) && err.empty());
+    CHECK(doc.historySize() == steps + 1);
+    CHECK(same(world({0}, true), w0) && same(world({1}), w1));
+    splash::Bounds b = bounds(node);
+    CHECK(near(b.min().y, 0) && near(b.center.x, 0) && near(b.center.z, 0));
+    CHECK(pivotOf(cube, node).has_value() && !pivotOf(cube, baked));
+    const std::string meshAfter = bytes(proj / node), sideAfter = bytes(side);
+    CHECK(meshAfter != meshBefore && sideAfter != sideBefore);
+
+    // (b) Undo: transforms, mesh and sidecar as they were; redo: as set.
+    CHECK(doc.undo());
+    CHECK(sameTransform(doc.object({0})->transform, t0) && sameTransform(doc.object({1})->transform, t1) &&
+          sameTransform(doc.object({0, 0})->transform, tl));
+    CHECK(bytes(proj / node) == meshBefore && bytes(side) == sideBefore);
+    CHECK(same(world({0}, true), w0) && same(world({1}), w1));
+    CHECK(doc.redo());
+    CHECK(bytes(proj / node) == meshAfter && bytes(side) == sideAfter);
+    CHECK(same(world({0}, true), w0) && same(world({1}), w1));
+
+    // (c) Imported again: the pivot stays, and so does everything.
+    CHECK(editor::reimportModel(doc, cube).error.empty());
+    CHECK(same(world({0}, true), w0) && same(world({1}), w1));
+    b = bounds(node);
+    CHECK(near(b.min().y, 0) && near(b.center.x, 0) && pivotOf(cube, node).has_value());
+
+    // (i) A zero move, or the pivot already there: refused, nothing written.
+    size_t now = doc.historySize();
+    err.clear();
+    CHECK(!editor::setPivot(doc, {0}, editor::PivotMode::Custom, {0, 0, 0}, &err) && !err.empty());
+    CHECK(!editor::setPivot(doc, {1}, editor::PivotMode::BottomCentre, {}, &err));
+    CHECK(doc.historySize() == now && bytes(proj / node) == meshAfter && bytes(side) == sideAfter);
+    // Custom, from the second copy: a point in the mesh as it is now.
+    CHECK(editor::setPivot(doc, {1}, editor::PivotMode::Custom, {0.25f, 0.5f, 0}, &err));
+    CHECK(same(world({0}, true), w0) && same(world({1}), w1));
+    b = bounds(node);
+    CHECK(near(b.min().y, -0.5f) && near(b.center.x, -0.25f));
+    CHECK(pivotOf(cube, node) && near(pivotOf(cube, node)->y, 0.5f));  // 0 + 0.5: the moves add up
+
+    // (g) Merge meshes on: both copies swap to the baked mesh, nothing moves.
+    splash::ImportSettings rs = splash::loadImportSettings(cube);
+    rs.mergeMeshes = true;
+    splash::saveImportSettings(cube, rs);
+    CHECK(editor::reimportModel(doc, cube, false).error.empty());
+    CHECK(doc.object({0})->mesh->mesh == baked && doc.object({1})->mesh->mesh == baked);
+    CHECK(same(world({0}, true), w0) && same(world({1}), w1));
+    // (e) Centre on the baked mesh as well, then imported again.
+    CHECK(editor::setPivot(doc, {1}, editor::PivotMode::Centre, {}, &err));
+    CHECK(same(world({0}, true), w0) && same(world({1}), w1));
+    b = bounds(baked);
+    CHECK(nearV(b.center, {0, 0, 0}, 1e-4f) && pivotOf(cube, baked).has_value());
+    CHECK(editor::reimportModel(doc, cube).error.empty());
+    CHECK(same(world({0}, true), w0) && same(world({1}), w1));
+    // Off again with both meshes pivoted: the second copy goes back to the
+    // node mesh (the first keeps the baked one for its lamp, as without a
+    // pivot), and nothing moves.
+    rs = splash::loadImportSettings(cube);
+    rs.mergeMeshes = false;
+    splash::saveImportSettings(cube, rs);
+    CHECK(editor::reimportModel(doc, cube, true).error.empty());
+    CHECK(doc.object({1})->mesh->mesh == node);
+    CHECK(same(world({0}, true), w0) && same(world({1}), w1));
+    // And on once more, from the node mesh to the pivoted baked mesh.
+    rs.mergeMeshes = true;
+    splash::saveImportSettings(cube, rs);
+    CHECK(editor::reimportModel(doc, cube, false).error.empty());
+    CHECK(doc.object({1})->mesh->mesh == baked);
+    CHECK(same(world({0}, true), w0) && same(world({1}), w1));
+    rs.mergeMeshes = false;
+    splash::saveImportSettings(cube, rs);
+    CHECK(editor::reimportModel(doc, cube, true).error.empty());
+    CHECK(same(world({0}, true), w0) && same(world({1}), w1));
+
+    // (e) A one-node model that is not moved draws the baked mesh: Centre.
+    CHECK(editor::placeModel(doc, outside / "tri.obj", std::nullopt, {2}, {7, 0, 1}).error.empty());
+    CHECK(doc.object({2}) && doc.object({2})->mesh && doc.object({2})->mesh->mesh == "models/tri.mesh");
+    const std::vector<splash::Vec3> w2 = world({2});
+    CHECK(editor::setPivot(doc, {2}, editor::PivotMode::Centre, {}, &err));
+    CHECK(same(world({2}), w2) && nearV(bounds("models/tri.mesh").center, {0, 0, 0}, 1e-4f));
+    CHECK(editor::reimportModel(doc, proj / "models" / "tri.obj").error.empty());
+    CHECK(same(world({2}), w2) && nearV(bounds("models/tri.mesh").center, {0, 0, 0}, 1e-4f));
+
+    // (f) A tree: Body, holding Arm and a user's tag, gets a pivot.
+    CHECK(editor::placeModel(doc, outside / "robot.gltf", std::nullopt, {3}, {0, 0, -4}).error.empty());
+    const editor::ObjectPath body{3, 0}, arm{3, 0, 0};
+    CHECK(doc.object(body) && doc.object(body)->name == "Body" && doc.object(arm) && doc.object(arm)->name == "Arm");
+    splash::Object tag = named("Tag");
+    tag.transform.position = {0.5f, 0.5f, 0.5f};
+    doc.insertObject({3, 0, 1}, tag);
+    const fs::path robot = proj / "models" / "robot.gltf";
+    const std::vector<splash::Vec3> wb = world(body, true), wa = world(arm);
+    CHECK(editor::setPivot(doc, body, editor::PivotMode::Custom, {0.5f, 0.25f, 0}, &err));
+    CHECK(same(world(body, true), wb) && same(world(arm), wa));
+    CHECK(pivotOf(robot, "models/robot/Body.mesh") && !pivotOf(robot, "models/robot/Arm.mesh"));
+    editor::Reimported re = editor::reimportModel(doc, robot);
+    CHECK(re.error.empty());
+    CHECK(same(world(body, true), wb) && same(world(arm), wa));
+    // The node transforms the import made are the ones setPivot left.
+    CHECK(re.model.nodes.size() == 2 && nearV(doc.object(body)->transform.position, re.model.nodes[0].transform.position) &&
+          nearV(doc.object(arm)->transform.position, re.model.nodes[1].transform.position));
+    // A second copy placed now draws where the first does, offset by the drop point.
+    CHECK(editor::placeModel(doc, robot, std::nullopt, {4}, {0, 0, -4}).error.empty());
+    CHECK(same(world({4, 0}), world(body)) && same(world({4, 0, 0}), wa));
+    CHECK(doc.undo());
+
+    // (h) A skinned mesh, and a mesh no import wrote: refused, nothing written.
+    {
+        const fs::path rigs = fs::path(SPLASHEDIT_SOURCE_DIR) / "tests" / "skinimport";
+        fs::copy_file(rigs / "rig_host.gltf", outside / "rig_host.gltf", ec);
+        CHECK(editor::placeModel(doc, outside / "rig_host.gltf", std::nullopt, {4}, {0, 0, 0}).error.empty());
+        editor::ObjectPath skinned;
+        for (const editor::ObjectPath& p : doc.flatPaths())
+            if (p.size() > 1 && p[0] == 4 && doc.object(p)->mesh && doc.object(p)->skin) skinned = p;
+        CHECK(!skinned.empty());
+        const fs::path rig = proj / "models" / "rig_host.gltf";
+        const std::string rigSide = bytes(splash::importSettingsPath(rig));
+        now = doc.historySize();
+        err.clear();
+        CHECK(!skinned.empty() && !editor::pivotBlocker(doc, skinned).empty());
+        CHECK(!skinned.empty() && !editor::setPivot(doc, skinned, editor::PivotMode::Centre, {}, &err) && !err.empty());
+        CHECK(doc.historySize() == now && bytes(splash::importSettingsPath(rig)) == rigSide);
+
+        fs::create_directories(proj / "meshes", ec);
+        splash::Mesh hand;
+        hand.positions = {{0, 0, 0}, {1, 0, 0}, {0, 1, 0}};
+        hand.submeshes = {{0, 1, 2}};
+        splash::saveMesh(hand, proj / "meshes" / "hand.mesh");
+        const std::string handBytes = bytes(proj / "meshes" / "hand.mesh");
+        splash::Object h = named("Hand");
+        h.mesh.emplace();
+        h.mesh->mesh = "meshes/hand.mesh";
+        doc.insertObject({5}, h);
+        now = doc.historySize();
+        err.clear();
+        CHECK(!editor::pivotBlocker(doc, {5}).empty());
+        CHECK(!editor::setPivot(doc, {5}, editor::PivotMode::Centre, {}, &err) && !err.empty());
+        CHECK(doc.historySize() == now && bytes(proj / "meshes" / "hand.mesh") == handBytes &&
+              !fs::exists(proj / "meshes" / "hand.mesh.import.json") && !fs::exists(proj / "meshes" / "hand.import.json"));
+        // An object with no mesh at all.
+        CHECK(!editor::setPivot(doc, {3}, editor::PivotMode::Centre, {}, &err) && doc.historySize() == now);
+    }
 }
 
 // #311: a model of one node that is moved (a cube exported from a level) is
@@ -18878,6 +19134,7 @@ int main(int argc, char** argv) {
     testSeqRenameBlocks();
     testPlaceModel();
     testPlaceOneNodeModel();
+    testSetPivot();
     testPlaceSkinnedModel();
     testDefaultClipLoop();
     testClipLoopImportAndEdit();
