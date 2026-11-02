@@ -1069,12 +1069,22 @@ struct Resync {
     // (`toNode`) or back to the baked mesh, its transform and its children's
     // changed so that nothing moves. False, the object untouched, when a
     // transform for that does not exist (a scale that would shear).
+    // The node mesh's place in the baked mesh's space: the node's transform,
+    // which carries the node mesh's pivot already, less the baked mesh's own
+    // pivot (settings.pivots), which the import took off its positions.
+    splash::Transform inBaked(const splash::ImportedNode& node) const {
+        splash::Transform t = node.transform;
+        auto it = settings.pivots.find(model.mesh);
+        if (it != settings.pivots.end() && !model.skinned) t.position = t.position - it->second;
+        return t;
+    }
     bool repivot(splash::Object& o, const splash::ImportedNode& node, bool toNode) {
-        std::optional<splash::Transform> self = toNode ? composed(o.transform, node.transform) : uncomposed(o.transform, node.transform);
+        const splash::Transform rel = inBaked(node);
+        std::optional<splash::Transform> self = toNode ? composed(o.transform, rel) : uncomposed(o.transform, rel);
         if (!self) return false;
         // Children keep their places: the change undone under them.
         std::optional<splash::Transform> back;
-        if (!o.children.empty()) back = toNode ? inverted(node.transform) : std::optional<splash::Transform>(node.transform);
+        if (!o.children.empty()) back = toNode ? inverted(rel) : std::optional<splash::Transform>(rel);
         std::vector<splash::Transform> kids;
         for (const splash::Object& c : o.children) {
             std::optional<splash::Transform> t = back ? composed(*back, c.transform) : std::nullopt;
