@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cmath>
 #include <exception>
 #include <fstream>
 #include <iterator>
@@ -535,9 +536,65 @@ static std::vector<splash::Object> nodeObjects(const splash::ImportedModel& mode
     return top;
 }
 
+// Transforms composed the way flatten() puts a child under its parent. That
+// equals the product of their matrices, which is what the baked mesh holds,
+// when the first's scale is uniform or the second is not turned; otherwise
+// (shear) there is no transform for it and these give nothing.
+static bool uniformScale(splash::Vec3 s) {
+    const float hi = std::max({std::fabs(s.x), std::fabs(s.y), std::fabs(s.z)});
+    return std::max({std::fabs(s.x - s.y), std::fabs(s.y - s.z), std::fabs(s.x - s.z)}) <= 1e-5f * hi;
+}
+static bool unturned(splash::Quat q) {
+    return std::fabs(q.x) <= 1e-6f && std::fabs(q.y) <= 1e-6f && std::fabs(q.z) <= 1e-6f;
+}
+static splash::Quat mulQuat(splash::Quat a, splash::Quat b) {
+    return {a.w * b.x + a.x * b.w + a.y * b.z - a.z * b.y, a.w * b.y + a.y * b.w + a.z * b.x - a.x * b.z,
+            a.w * b.z + a.z * b.w + a.x * b.y - a.y * b.x, a.w * b.w - a.x * b.x - a.y * b.y - a.z * b.z};
+}
+static bool noZeroScale(splash::Vec3 s) { return s.x != 0 && s.y != 0 && s.z != 0; }
+// b under a: the transform of an object with b inside one with a.
+static std::optional<splash::Transform> composed(const splash::Transform& a, const splash::Transform& b) {
+    if (!uniformScale(a.scale) && !unturned(b.rotation)) return std::nullopt;
+    splash::Transform t;
+    t.position = splash::Mat34::trs(a.position, a.rotation, a.scale).point(b.position);
+    t.rotation = mulQuat(a.rotation, b.rotation);
+    t.scale = splash::scale(a.scale, b.scale);
+    return t;
+}
+// The transform x with composed(x, b) == a.
+static std::optional<splash::Transform> uncomposed(const splash::Transform& a, const splash::Transform& b) {
+    if (!noZeroScale(b.scale)) return std::nullopt;
+    splash::Transform x;
+    x.scale = {a.scale.x / b.scale.x, a.scale.y / b.scale.y, a.scale.z / b.scale.z};
+    if (!uniformScale(x.scale) && !unturned(b.rotation)) return std::nullopt;
+    x.rotation = mulQuat(a.rotation, {-b.rotation.x, -b.rotation.y, -b.rotation.z, b.rotation.w});
+    x.position = a.position - splash::rotate(x.rotation, splash::scale(x.scale, b.position));
+    return x;
+}
+static std::optional<splash::Transform> inverted(const splash::Transform& t) { return uncomposed(splash::Transform{}, t); }
+static bool identity(const splash::Transform& t) {
+    return t.position == splash::Vec3{} && unturned(t.rotation) && t.rotation.w > 0 && t.scale == splash::Vec3{1, 1, 1};
+}
+
+// The node an unmerged model of one node draws, so the object's pivot is the
+// node's: its mesh in its own space and its transform. Only a mesh that is
+// not skinned and is moved, turned or scaled; otherwise the baked mesh is the
+// same thing.
+static const splash::ImportedNode* soleNode(const splash::ImportedModel& model) {
+    if (model.nodes.size() != 1 || model.skinned) return nullptr;
+    const splash::ImportedNode& n = model.nodes[0];
+    if (n.mesh.empty() || n.skinned || identity(n.transform)) return nullptr;
+    return &n;
+}
+
 splash::Object modelObject(const splash::ImportedModel& model, const std::string& name, const splash::ImportSettings& settings) {
     splash::Object root;
     root.name = name;
+    if (const splash::ImportedNode* n = settings.mergeMeshes ? nullptr : soleNode(model)) {
+        root.transform = n->transform;
+        root.mesh = modelMesh(n->mesh, n->materials, settings);
+        return root;
+    }
     if (model.nodes.size() <= 1 || settings.mergeMeshes) {
         root.mesh = modelMesh(model.mesh, model.materials, settings);
         if (model.skinned) root.skin = modelSkin(model);
@@ -862,7 +919,8 @@ PlacedModel applyPlace(Document& doc, StagedModel& s, const std::optional<Object
         return r;
     }
     splash::Object obj = modelObject(r.model, uniqueName(utf8(file.stem()), parent ? parent->children : doc.scene().objects), settings);
-    obj.transform.position = position;
+    // At `position`: a node's transform the object carries goes on top of it.
+    obj.transform.position = obj.transform.position + position;
     doc.insertObject(at, std::move(obj));
     r.path = at;
     return r;
@@ -1007,6 +1065,28 @@ struct Resync {
             if (!matched[k]) changed |= walk(o.children[k]);
         return changed;
     }
+    // An object of a model of one node (soleNode) swapped to the node's mesh
+    // (`toNode`) or back to the baked mesh, its transform and its children's
+    // changed so that nothing moves. False, the object untouched, when a
+    // transform for that does not exist (a scale that would shear).
+    bool repivot(splash::Object& o, const splash::ImportedNode& node, bool toNode) {
+        std::optional<splash::Transform> self = toNode ? composed(o.transform, node.transform) : uncomposed(o.transform, node.transform);
+        if (!self) return false;
+        // Children keep their places: the change undone under them.
+        std::optional<splash::Transform> back;
+        if (!o.children.empty()) back = toNode ? inverted(node.transform) : std::optional<splash::Transform>(node.transform);
+        std::vector<splash::Transform> kids;
+        for (const splash::Object& c : o.children) {
+            std::optional<splash::Transform> t = back ? composed(*back, c.transform) : std::nullopt;
+            if (!t) return false;
+            kids.push_back(*t);
+        }
+        o.transform = *self;
+        for (size_t i = 0; i < kids.size(); ++i) o.children[i].transform = kids[i];
+        o.mesh->mesh = toNode ? node.mesh : model.mesh;
+        setMaterials(*o.mesh, toNode ? node.materials : model.materials);
+        return true;
+    }
     bool walk(splash::Object& o) {
         bool changed = false;
         std::vector<bool> handled(o.children.size());
@@ -1023,6 +1103,8 @@ struct Resync {
                     handled[(*top)[i]] = true;
                 }
             }
+        } else if (o.mesh && o.mesh->mesh == model.mesh && toTree && soleNode(model) && repivot(o, *soleNode(model), true)) {
+            changed = true;
         } else if (o.mesh && o.mesh->mesh == model.mesh) {
             if (toTree && model.nodes.size() > 1) {
                 o.mesh.reset();
@@ -1036,6 +1118,8 @@ struct Resync {
                 changed |= setMaterials(*o.mesh, model.materials);
                 changed |= syncSkin(o, model.skinned);
             }
+        } else if (o.mesh && toMerged && soleNode(model) && o.mesh->mesh == soleNode(model)->mesh && repivot(o, *soleNode(model), false)) {
+            changed = true;
         } else if (o.mesh) {
             auto it = nodeOfMesh.find(o.mesh->mesh);
             if (it != nodeOfMesh.end()) {

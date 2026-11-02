@@ -4078,6 +4078,216 @@ void testPlaceModel() {
     CHECK(!p.error.empty() && doc.historySize() == before && !fs::exists(proj / "models" / "junk.glb"));
 }
 
+// #311: a model of one node that is moved (a cube exported from a level) is
+// placed with the node's pivot: the object draws the node's own mesh and
+// carries the node's transform on top of the drop point, every vertex where
+// the baked mesh placed the old way has it. A reimport keeps a transform the
+// user gave it, and Merge meshes swapping the mesh moves nothing.
+void testPlaceOneNodeModel() {
+    namespace fs = std::filesystem;
+    std::error_code ec;
+    fs::path dir = g_outDir / "placeonenode";
+    fs::remove_all(dir, ec);
+    fs::path proj = dir / "game", outside = dir / "downloads";
+    fs::create_directories(proj, ec);
+    fs::create_directories(outside, ec);
+    // Cube: moved 5 along X and 1 up, turned 90 degrees about Y, scaled 2
+    // along X, drawing the triangle (0,0,0) (1,0,0) (0,1,0) in `red`.
+    auto cubeGltf = [](float x, float red) {
+        return std::string(R"({"asset":{"version":"2.0"},"scene":0,"scenes":[{"nodes":[0]}],
+"nodes":[{"name":"Cube","mesh":0,"translation":[)") +
+               std::to_string(x) + R"(,1,0],"rotation":[0,0.70710678,0,0.70710678],"scale":[2,1,1]}],
+"materials":[{"pbrMetallicRoughness":{"baseColorFactor":[)" +
+               std::to_string(red) + R"(,0,0,1]}}],
+"meshes":[{"primitives":[{"attributes":{"POSITION":0},"material":0}]}],
+"accessors":[{"bufferView":0,"componentType":5126,"count":3,"type":"VEC3","min":[0,0,0],"max":[1,1,0]}],
+"bufferViews":[{"buffer":0,"byteLength":36}],
+"buffers":[{"byteLength":36,"uri":"data:application/octet-stream;base64,AAAAAAAAAAAAAAAAAACAPwAAAAAAAAAAAAAAAAAAgD8AAAAA"}]})";
+    };
+    std::ofstream(outside / "cube.gltf") << cubeGltf(5, 1);
+    const fs::path cube = proj / "models" / "cube.gltf";
+    editor::Document doc;
+    doc.reset(splash::Scene{}, proj, "game");
+
+    // Where an object's mesh (and, with `kids`, its children's) is in the world.
+    auto world = [&](const splash::Object* o, bool kids = false) {
+        std::vector<splash::Vec3> out;
+        std::vector<splash::FlatObject> flat = splash::flatten(doc.scene());
+        for (size_t i = 0; i < flat.size(); ++i) {
+            if (flat[i].object != o) continue;
+            for (const splash::Vec3& v : splash::loadMesh(proj / o->mesh->mesh).positions) out.push_back(flat[i].localToWorld.point(v));
+        }
+        for (size_t c = 0; kids && c < o->children.size(); ++c)
+            for (const splash::FlatObject& fo : flat)
+                if (fo.object == &o->children[c]) out.push_back(fo.worldPosition);
+        return out;
+    };
+    auto same = [](const std::vector<splash::Vec3>& a, const std::vector<splash::Vec3>& b) {
+        bool ok = !a.empty() && a.size() == b.size();
+        for (size_t i = 0; ok && i < a.size(); ++i) ok = nearV(a[i], b[i], 1e-4f);
+        if (!ok)
+            for (size_t i = 0; i < a.size() && i < b.size(); ++i)
+                std::fprintf(stderr, "  %zu: (%g %g %g) vs (%g %g %g)\n", i, a[i].x, a[i].y, a[i].z, b[i].x, b[i].y, b[i].z);
+        return ok;
+    };
+
+    // (a) Dropped at (4, 5, 6): the node's transform on top of the drop point.
+    const splash::Vec3 drop{4, 5, 6};
+    editor::PlacedModel p = editor::placeModel(doc, outside / "cube.gltf", std::nullopt, {0}, drop);
+    CHECK(p.error.empty() && p.model.nodes.size() == 1 && doc.historySize() == 1);
+    const splash::Object* root = doc.object({0});
+    CHECK(root && root->name == "cube" && root->children.empty() && root->mesh && root->mesh->mesh == "models/cube/Cube.mesh" &&
+          !root->skin);
+    CHECK(root && root->mesh && root->mesh->materials.size() == 1 && near(root->mesh->materials[0].color[0], 1));
+    const splash::Transform node = p.model.nodes[0].transform;
+    CHECK(near(node.position.x, -5) && near(node.position.y, 1));  // the .mesh space mirrors X
+    CHECK(root && nearV(root->transform.position, node.position + drop) && near(root->transform.rotation.y, node.rotation.y) &&
+          near(root->transform.rotation.w, node.rotation.w) && nearV(root->transform.scale, node.scale));
+    CHECK(root && near(root->transform.position.x, -1) && near(root->transform.scale.x, 2));
+    // The old way: the baked mesh drawn at the drop point.
+    std::vector<splash::Vec3> baked;
+    for (const splash::Vec3& v : splash::loadMesh(proj / "models" / "cube.mesh").positions) baked.push_back(v + drop);
+    const std::vector<splash::Vec3> placed = world(root);
+    CHECK(placed.size() == 3 && same(placed, baked));
+    // As a child of another object, `drop` is in its space: the same holds there.
+    {
+        splash::Object holder = named("Holder");
+        holder.transform.position = {1, 2, 3};
+        doc.insertObject({1}, holder);
+        CHECK(editor::placeModel(doc, outside / "cube.gltf", std::nullopt, {1, 0}, drop).error.empty());
+        std::vector<splash::Vec3> under;
+        for (const splash::Vec3& v : baked) under.push_back(v + splash::Vec3{1, 2, 3});
+        CHECK(doc.object({1, 0}) && same(world(doc.object({1, 0})), under));
+        CHECK(doc.undo() && doc.undo() && doc.scene().objects.size() == 1);
+    }
+
+    // (b) Moved and turned by the user, then reimported from a file where
+    // the cube moved and changed colour: the materials follow, the
+    // transform the user gave stays.
+    root = doc.object({0});
+    CHECK(root && same(world(root), placed));
+    splash::Transform mine = root->transform;
+    mine.position = {10, 0, -3};
+    mine.rotation = {0, 0, 0.38268343f, 0.92387953f};
+    doc.edit({0}, [&](splash::Object& o) { o.transform = mine; });
+    std::ofstream(outside / "cube.gltf") << cubeGltf(7, 0.5f);
+    editor::Reimported re = editor::reimportModel(doc, cube);
+    root = doc.object({0});
+    CHECK(re.error.empty() && root && root->mesh && root->mesh->mesh == "models/cube/Cube.mesh");
+    CHECK(root && root->mesh && root->mesh->materials.size() == 1 && near(root->mesh->materials[0].color[0], 0.5f));
+    CHECK(root && root->transform.position == mine.position && root->transform.rotation.z == mine.rotation.z &&
+          root->transform.scale == mine.scale);
+    // Back where the import put it, for the rest.
+    std::ofstream(outside / "cube.gltf") << cubeGltf(5, 1);
+    CHECK(editor::reimportModel(doc, cube).error.empty());
+    doc.edit({0}, [&](splash::Object& o) { o.transform.position = node.position + drop, o.transform.rotation = node.rotation; });
+    root = doc.object({0});
+    CHECK(root && same(world(root), baked));
+
+    // (c) Skinned, merged or not moved: the baked mesh, as before.
+    {
+        splash::ImportedModel skinned;
+        skinned.mesh = "models/rig.mesh";
+        skinned.skinned = true;
+        skinned.nodes.push_back({});
+        skinned.nodes[0].name = "Body";
+        skinned.nodes[0].transform.position = {5, 0, 0};
+        skinned.nodes[0].mesh = "models/rig/Body.mesh";
+        skinned.nodes[0].skinned = true;
+        splash::Object o = editor::modelObject(skinned, "rig");
+        CHECK(o.mesh && o.mesh->mesh == "models/rig.mesh" && o.transform.position == splash::Vec3{} && o.children.empty());
+        splash::ImportSettings merged;
+        merged.mergeMeshes = true;
+        o = editor::modelObject(p.model, "cube", merged);
+        CHECK(o.mesh && o.mesh->mesh == "models/cube.mesh" && o.transform.position == splash::Vec3{} && o.children.empty());
+        splash::ImportedModel still = p.model;
+        still.nodes[0].transform = {};
+        o = editor::modelObject(still, "cube");
+        CHECK(o.mesh && o.mesh->mesh == "models/cube.mesh" && o.transform.position == splash::Vec3{});
+        // Placed with Merge meshes on in its sidecar: the baked mesh at the drop point.
+        splash::ImportSettings rs = splash::loadImportSettings(cube);
+        rs.mergeMeshes = true;
+        splash::saveImportSettings(cube, rs);
+        p = editor::placeModel(doc, cube, std::nullopt, {1}, drop);
+        CHECK(p.error.empty() && doc.object({1}) && doc.object({1})->mesh && doc.object({1})->mesh->mesh == "models/cube.mesh" &&
+              doc.object({1})->transform.position == drop);
+        CHECK(doc.object({1}) && same(world(doc.object({1})), baked));
+        CHECK(doc.undo());
+        rs.mergeMeshes = false;
+        splash::saveImportSettings(cube, rs);
+    }
+
+    // (d) An object drawing the baked mesh (a project from before) is left
+    // as it is by a reimport: mesh, transform, and so where it is drawn.
+    splash::Object old = named("Old");
+    old.transform.position = {-2, 0, 1};
+    old.transform.scale = {1, 3, 1};
+    old.mesh.emplace();
+    old.mesh->mesh = "models/cube.mesh";
+    doc.insertObject({1}, old);
+    const std::vector<splash::Vec3> oldWorld = world(doc.object({1}));
+    re = editor::reimportModel(doc, cube);
+    CHECK(re.error.empty() && doc.object({1}) && doc.object({1})->mesh->mesh == "models/cube.mesh" &&
+          doc.object({1})->transform.position == old.transform.position && doc.object({1})->transform.scale == old.transform.scale);
+    CHECK(doc.object({1}) && same(world(doc.object({1})), oldWorld));
+
+    // (e) Merge meshes on: the placed cube draws the baked mesh, its
+    // transform taken back to the drop point, nothing moves (a child neither).
+    splash::Object kid = named("Lamp");
+    kid.transform.position = {0, 2, 0};
+    doc.insertObject({0, 0}, kid);
+    // One the user scaled so that no transform keeps it in place: left as it is.
+    p = editor::placeModel(doc, cube, std::nullopt, {2}, drop);
+    CHECK(p.error.empty() && doc.object({2}) && doc.object({2})->mesh->mesh == "models/cube/Cube.mesh");
+    doc.edit({2}, [](splash::Object& o) { o.transform.scale = {2, 3, 1}; });
+    // And an old object scaled evenly and turned, which can take the node's pivot.
+    splash::Object older = named("Older");
+    older.transform.position = {3, 0, 0};
+    older.transform.rotation = {0.38268343f, 0, 0, 0.92387953f};
+    older.transform.scale = {2, 2, 2};
+    older.mesh.emplace();
+    older.mesh->mesh = "models/cube.mesh";
+    doc.insertObject({3}, older);
+    const std::vector<splash::Vec3> before = world(doc.object({0}), true), oldBefore = world(doc.object({1})),
+                                    shearBefore = world(doc.object({2})), olderBefore = world(doc.object({3}));
+    splash::ImportSettings rs = splash::loadImportSettings(cube);
+    rs.mergeMeshes = true;
+    splash::saveImportSettings(cube, rs);
+    re = editor::reimportModel(doc, cube, false);
+    root = doc.object({0});
+    CHECK(re.error.empty() && root && root->mesh && root->mesh->mesh == "models/cube.mesh" && root->children.size() == 1);
+    CHECK(root && nearV(root->transform.position, drop) && near(root->transform.rotation.w, 1) && nearV(root->transform.scale, {1, 1, 1}));
+    CHECK(root && same(world(root, true), before));
+    CHECK(doc.object({1}) && doc.object({1})->mesh->mesh == "models/cube.mesh" && same(world(doc.object({1})), oldBefore));
+    CHECK(doc.object({2}) && doc.object({2})->mesh->mesh == "models/cube/Cube.mesh" &&
+          doc.object({2})->transform.scale == splash::Vec3({2, 3, 1}) && same(world(doc.object({2})), shearBefore));
+    CHECK(doc.object({3}) && doc.object({3})->mesh->mesh == "models/cube.mesh" && same(world(doc.object({3})), olderBefore));
+    // Off again: the node's mesh and pivot are back, still nothing moves. An
+    // old object goes the same way, since the setting asked for it, unless
+    // its scale would shear the node's turn: that one keeps the baked mesh,
+    // as does the cube while it holds the lamp (which would need the node's
+    // scale undone across its turn).
+    rs.mergeMeshes = false;
+    splash::saveImportSettings(cube, rs);
+    re = editor::reimportModel(doc, cube, true);
+    root = doc.object({0});
+    CHECK(re.error.empty() && root && root->mesh && root->mesh->mesh == "models/cube.mesh" && same(world(root, true), before));
+    CHECK(doc.undo());
+    CHECK(doc.removeObject({0, 0}) && doc.object({0})->children.empty());
+    const std::vector<splash::Vec3> alone = world(doc.object({0}));
+    re = editor::reimportModel(doc, cube, true);
+    root = doc.object({0});
+    CHECK(re.error.empty() && root && root->mesh && root->mesh->mesh == "models/cube/Cube.mesh");
+    CHECK(root && nearV(root->transform.position, node.position + drop) && near(root->transform.rotation.y, node.rotation.y) &&
+          nearV(root->transform.scale, node.scale));
+    CHECK(root && same(world(root), alone));
+    CHECK(doc.object({1}) && doc.object({1})->mesh->mesh == "models/cube.mesh" && same(world(doc.object({1})), oldBefore));
+    CHECK(doc.object({2}) && same(world(doc.object({2})), shearBefore));
+    CHECK(doc.object({3}) && doc.object({3})->mesh->mesh == "models/cube/Cube.mesh" && same(world(doc.object({3})), olderBefore));
+    // One undo step each way.
+    CHECK(doc.undo() && doc.object({0}) && doc.object({0})->mesh->mesh == "models/cube.mesh");
+}
+
 // The loop an imported clip starts with comes from its name: a word starting
 // with idle, walk, run, ... loops; anything else plays once.
 void testDefaultClipLoop() {
@@ -18667,6 +18877,7 @@ int main(int argc, char** argv) {
     testBlocksVariables();
     testSeqRenameBlocks();
     testPlaceModel();
+    testPlaceOneNodeModel();
     testPlaceSkinnedModel();
     testDefaultClipLoop();
     testClipLoopImportAndEdit();
