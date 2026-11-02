@@ -159,7 +159,10 @@ std::string addInteractCallback(const std::string& text, bool blocks);
 
 // The objects an imported model becomes, the top one named `name`. A model of
 // one node, or any model with `settings.mergeMeshes`, is one object drawing
-// the baked mesh. Otherwise the top object is an empty holding an object per
+// the baked mesh; but when that node's mesh is not skinned and the node is
+// moved, turned or scaled, and meshes are not merged, the object draws the
+// node's own mesh with the node's transform, so its pivot is the node's.
+// Otherwise the top object is an empty holding an object per
 // node, the file's tree kept: each with the node's local transform and, if it
 // has one, its mesh and materials. Every mesh component gets the settings'
 // bit depth and lighting. An object drawing a skinned mesh also gets a skin

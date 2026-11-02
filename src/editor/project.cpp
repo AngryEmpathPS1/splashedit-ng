@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cmath>
 #include <exception>
 #include <fstream>
 #include <iterator>
@@ -535,9 +536,32 @@ static std::vector<splash::Object> nodeObjects(const splash::ImportedModel& mode
     return top;
 }
 
+static bool unturned(splash::Quat q) {
+    return std::fabs(q.x) <= 1e-6f && std::fabs(q.y) <= 1e-6f && std::fabs(q.z) <= 1e-6f;
+}
+static bool identity(const splash::Transform& t) {
+    return t.position == splash::Vec3{} && unturned(t.rotation) && t.rotation.w > 0 && t.scale == splash::Vec3{1, 1, 1};
+}
+
+// The node an unmerged model of one node draws, so the object's pivot is the
+// node's: its mesh in its own space and its transform. Only a mesh that is
+// not skinned and is moved, turned or scaled; otherwise the baked mesh is the
+// same thing.
+static const splash::ImportedNode* soleNode(const splash::ImportedModel& model) {
+    if (model.nodes.size() != 1 || model.skinned) return nullptr;
+    const splash::ImportedNode& n = model.nodes[0];
+    if (n.mesh.empty() || n.skinned || identity(n.transform)) return nullptr;
+    return &n;
+}
+
 splash::Object modelObject(const splash::ImportedModel& model, const std::string& name, const splash::ImportSettings& settings) {
     splash::Object root;
     root.name = name;
+    if (const splash::ImportedNode* n = settings.mergeMeshes ? nullptr : soleNode(model)) {
+        root.transform = n->transform;
+        root.mesh = modelMesh(n->mesh, n->materials, settings);
+        return root;
+    }
     if (model.nodes.size() <= 1 || settings.mergeMeshes) {
         root.mesh = modelMesh(model.mesh, model.materials, settings);
         if (model.skinned) root.skin = modelSkin(model);
@@ -862,7 +886,8 @@ PlacedModel applyPlace(Document& doc, StagedModel& s, const std::optional<Object
         return r;
     }
     splash::Object obj = modelObject(r.model, uniqueName(utf8(file.stem()), parent ? parent->children : doc.scene().objects), settings);
-    obj.transform.position = position;
+    // At `position`: a node's transform the object carries goes on top of it.
+    obj.transform.position = obj.transform.position + position;
     doc.insertObject(at, std::move(obj));
     r.path = at;
     return r;
