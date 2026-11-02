@@ -4,7 +4,8 @@
 # name another font has is refused), add (at most three), delete and undo.
 # A font's Source menu stays on screen and scrolls when the project has more
 # files than fit (#285); Source takes a .ttf or a bitmap .png dragged from the
-# Project panel and refuses other files.
+# Project panel and refuses other files. A bitmap font's Monospace and Gap
+# (#310) are saved and change the sample line's spacing.
 # Opens a copy of tests/ui/ui.scene with --ui and reads the editor's scripted
 # lines ("uicanvas: fonts: ...") and the saved scene. Needs a display (xvfb-run -a).
 # usage: python3 uifontscheck.py <splashedit>
@@ -44,11 +45,34 @@ def project(many=False):
         for k in range(20): shutil.copy(png, os.path.join(d, 'textures', 'sheet_%02d.png' % k))
         os.makedirs(os.path.join(d, 'audio'))
         shutil.copy(ttf, os.path.join(d, 'fonts', 'dragme.ttf'))
-        shutil.copy(png, os.path.join(d, 'textures', 'dragsheet.png'))
+        sheetpng(os.path.join(d, 'textures', 'dragsheet.png'))
         shutil.copy(png, os.path.join(d, 'textures', 'dragphoto.jpg'))
         shutil.copy(os.path.join(here, 'audio', 'short11.wav'), os.path.join(d, 'audio', 'dragsound.wav'))
     json.dump(s, open(os.path.join(d, 'ui.scene'), 'w'), indent=1)
     return d
+
+
+def sheetpng(path):
+    """A 256 x 48 bitmap font of 8 x 16 cells (96 glyphs): every glyph a bar
+    3 columns wide, so its measured advance is 3 + gap."""
+    raw = b''
+    for y in range(48):
+        ink = 2 <= y % 16 <= 13
+        raw += b'\0' + b''.join(b'\xff\xff\xff\xff' if ink and x % 8 < 3 else b'\0\0\0\0' for x in range(256))
+    chunk = lambda t, b: struct.pack('>I', len(b)) + t + b + struct.pack('>I', zlib.crc32(t + b))
+    open(path, 'wb').write(b'\x89PNG\r\n\x1a\n' + chunk(b'IHDR', struct.pack('>IIBBBBB', 256, 48, 8, 6, 0, 0, 0)) +
+                           chunk(b'IDAT', zlib.compress(raw)) + chunk(b'IEND', b''))
+
+
+def inkSpan(shot, r):
+    """Columns from the first to the last white pixel inside rect r, in sheet
+    pixels: a sample that fits is drawn at twice the size (sheetpng's ink is
+    12 rows tall)."""
+    w, h, bpp, rows = readpng(shot)
+    xs = [x for y in range(max(0, r[1]), min(h, r[3])) for x in range(max(0, r[0]), min(w, r[2]))
+          if rows[y][x * bpp] > 240 and rows[y][x * bpp + 1] > 240 and rows[y][x * bpp + 2] > 240]
+    k = 2 if inkRows(shot, r) > 12 * 1.1 else 1
+    return (max(xs) - min(xs) + 1) / k if xs else 0
 
 
 def run(args, shot=None, many=False):
@@ -141,6 +165,7 @@ def parsed(lines, i):
 
 # What the section shows at first: both fonts, their VRAM, a sample of each.
 scene0, lines, ctl, shot = run([])
+ctl0 = ctl
 t, b = parsed(lines, 0), parsed(lines, 1)
 check('font 0 reported with its sheet', t is not None and t[:4] == ('title', 'ttf', 'fonts/Inter-SemiBold.ttf', '16px') and t[4] > 0, lines)
 check('font 1 reported with its sheet', b is not None and b[:4] == ('body', 'ttf', 'fonts/Inter-Regular.ttf', '12px') and b[4] > 0, lines)
@@ -257,6 +282,29 @@ scene, lines, ctl, _ = dragged('dragsheet')
 f0 = scene['fonts'][0]
 check('a .png dragged onto Source makes it a bitmap font', 'textures/dragsheet.png' in f0.values() and not f0.get('source'),
       (f0, run.out[-300:]))
+check('a bitmap font shows Monospace and Gap', 'cvfont.0.mono' in ctl and 'cvfont.0.gap' in ctl, sorted(ctl)[:30])
+check('a TTF font shows neither', 'cvfont.0.mono' not in ctl0 and 'cvfont.0.gap' not in ctl0, sorted(ctl0)[:30])
+
+# #310: Monospace and Gap on a bitmap font, saved to the scene.
+DRAG = ['--click', SEARCH + ',0', '--text', 'dragsheet', '--wait', '5', '--drag', TILE + ',' + AT + ',0', '--wait', '10']
+scene, lines, ctl, dshot = run(DRAG, many=True)
+check('the dragged sheet builds as a bitmap font', not any(' error ' in l for l in lines), lines)
+span1 = inkSpan(dshot, ctl['cvfont.0.sample']) if 'cvfont.0.sample' in ctl else 0
+scene, lines, ctl, mshot = run(DRAG + ['--click', '@cvfont.0.mono', '--wait', '5'], many=True)
+spanm = inkSpan(mshot, ctl['cvfont.0.sample']) if 'cvfont.0.sample' in ctl else 0
+f0 = scene['fonts'][0]
+check('Monospace is saved, and hides Gap', f0.get('monospace') is True and 'gap' not in f0 and 'cvfont.0.gap' not in ctl,
+      (f0, sorted(ctl)[:30], run.out[-300:]))
+check('the monospace font still builds', not any(' error ' in l for l in lines), lines)
+scene, lines, ctl, gshot = run(DRAG + ['--dblclick', '@cvfont.0.gap', '--wait', '3', '--text', '0', '--key', 'enter', '--wait', '5'],
+                               many=True)
+f0 = scene['fonts'][0]
+check('Gap 0 is saved', f0.get('gap') == 0 and 'monospace' not in f0, (f0, run.out[-300:]))
+check('the gap 0 font still builds', not any(' error ' in l for l in lines), lines)
+span0 = inkSpan(gshot, ctl['cvfont.0.sample']) if 'cvfont.0.sample' in ctl else 0
+check('the sample line narrows with gap 0 and widens with Monospace', 0 < span0 < span1 < spanm, (span0, span1, spanm))
+print('screenshots:', dshot, mshot, gshot)
+
 for name, kind in (('dragsound', '.wav'), ('dragphoto', '.jpg')):
     scene, lines, ctl, _ = dragged(name)
     f0 = scene['fonts'][0]
