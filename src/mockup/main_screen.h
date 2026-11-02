@@ -364,6 +364,23 @@ struct State {
         std::optional<splash::ImportSettings> editing;
         // The import warnings the inspector listed this frame, for scripted checks.
         std::vector<std::string> shown;
+        // The Pivot row: why editor::setPivot would refuse the inspected
+        // object (empty: it would not), looked up with the rest; the Custom
+        // row while it is open and the point typed into it.
+        std::optional<std::vector<int>> pivotFor;
+        double pivotChecked = -2;
+        std::string pivotBlocked;
+        bool pivotCustom = false;
+        float pivotAt[3] = {0, 0, 0};
+        // Picked this frame, set next (it imports the model again, which can
+        // rebuild the object the inspector is drawing): the object, the
+        // editor::PivotMode and the Custom point.
+        struct PivotRequest {
+            std::vector<int> path;
+            int mode = 0;
+            splash::Vec3 at;
+        };
+        std::optional<PivotRequest> pivotRequest;
     } importPanel;
     // The inspector's nav Bake details disclosures (Player, Navigation).
     bool navBakeDetails[2] = {false, false};

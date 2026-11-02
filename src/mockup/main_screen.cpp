@@ -34,6 +34,7 @@
 #include "editor/gizmo.hh"
 #include "editor/lua_editor.hh"
 #include "editor/memcard.hh"
+#include "editor/pivot.hh"
 #include "editor/skin_clips.hh"
 #include "editor/sprites.hh"
 #include "editor/strings_edit.hh"
@@ -10980,8 +10981,10 @@ static void inspector(State& st, ImDrawList* dl, ImRect r, editor::Document& doc
                     ip.editing.reset();
                     const bool was = ip.settings.mergeMeshes;
                     try {
-                        // Clip names renamed since these settings were read stay.
-                        next.clipNames = splash::loadImportSettings(ip.model).clipNames;
+                        // Clip names renamed and pivots set since these settings were read stay.
+                        const splash::ImportSettings now = splash::loadImportSettings(ip.model);
+                        next.clipNames = now.clipNames;
+                        next.pivots = now.pivots;
                         splash::saveImportSettings(ip.model, next);
                     } catch (const std::exception& ex) {
                         notify(st, std::string("Import settings not saved: ") + ex.what(), true);
@@ -11156,6 +11159,61 @@ static void inspector(State& st, ImDrawList* dl, ImRect r, editor::Document& doc
                     splash::ImportSettings next = ip.settings;
                     next.lighting = lights[lPick];
                     apply(next);
+                }
+                // Pivot: a new origin for the mesh this object draws, every
+                // object drawing it kept where it is (editor::setPivot, one
+                // undo step). Off, saying why, where setPivot would refuse.
+                {
+                    if (ip.pivotFor != target || ip.pivotChecked != ip.checked) {
+                        if (ip.pivotFor != target) ip.pivotCustom = false;
+                        ip.pivotFor = target;
+                        ip.pivotChecked = ip.checked;
+                        ip.pivotBlocked = target ? editor::pivotBlocker(doc, *target) : std::string("no object is selected");
+                        if (!o->mesh || o->mesh->mesh.empty())
+                            ip.pivotBlocked = "this object draws no mesh itself: select the part of the model that does";
+                    }
+                    const std::string why = ip.pivotBlocked;
+                    auto setIt = [&](editor::PivotMode mode, splash::Vec3 at) {
+                        ip.pivotRequest = State::ImportPanel::PivotRequest{*target, int(mode), at};
+                    };
+                    ImRect pr = irow("lipivot", "Pivot",
+                                     "Moves the origin of the mesh this object draws, without moving anything: Centre puts it "
+                                     "in the middle of the mesh, Bottom centre in the middle of its base, Custom at a point "
+                                     "given in the mesh's own space (0, 0, 0 changes nothing). Every object drawing the mesh "
+                                     "stays where it is and importing again keeps it. One undo step.");
+                    nameRect("ipivot", pr);  // --click @ipivot
+                    if (!why.empty()) {
+                        interact("ipivot#off", pr);
+                        tooltip(("Set pivot is off: " + why + ".").c_str());
+                        ImGui::BeginDisabled(true);
+                        dropdown("ipivot", pr, nullptr, "Unavailable");
+                        ImGui::EndDisabled();
+                        scriptLine("import.pivot", "import pivot: off (" + why + ")");
+                    } else {
+                        int pick = dropdownMenu("ipivot", pr, nullptr, ip.pivotCustom ? "Custom" : "Set...",
+                                                {"Centre", "Bottom centre", "Custom"}, ip.pivotCustom ? 2 : -1);
+                        if (pick == 0) setIt(editor::PivotMode::Centre, {});
+                        if (pick == 1) setIt(editor::PivotMode::BottomCentre, {});
+                        if (pick == 2 && !ip.pivotCustom) {
+                            ip.pivotCustom = true;
+                            ip.pivotAt[0] = ip.pivotAt[1] = ip.pivotAt[2] = 0;
+                        }
+                        scriptLine("import.pivot", std::string("import pivot: ready") + (ip.pivotCustom ? " custom" : ""));
+                    }
+                    if (ip.pivotCustom && why.empty()) {
+                        ImRect cr = irow("lipivotat", "New origin",
+                                         "Where the new origin goes, in the mesh's own space as it is now, in metres. "
+                                         "Apply moves it there.");
+                        const float bw = buttonWidth(nullptr, "Apply");
+                        const ImRect fr(cr.Min, ImVec2(cr.Max.x - bw - space::sm, cr.Max.y));
+                        vec3Field("ipivotat", fr, fmtShort(ip.pivotAt[0]).c_str(), fmtShort(ip.pivotAt[1]).c_str(),
+                                  fmtShort(ip.pivotAt[2]).c_str(), nullptr, ip.pivotAt);
+                        const ImVec2 bp(cr.Max.x - bw, cr.GetCenter().y - (size::field + 6) * 0.5f);
+                        nameRect("ipivotapply", ImRect(bp, ImVec2(bp.x + bw, bp.y + size::field + 6)));  // --click @ipivotapply
+                        if (button("ipivotapply", bp, nullptr, "Apply", ButtonKind::Secondary, nullptr,
+                                   "Move the mesh's origin to this point; nothing in the scene moves."))
+                            setIt(editor::PivotMode::Custom, {ip.pivotAt[0], ip.pivotAt[1], ip.pivotAt[2]});
+                    }
                 }
                 // Every warning of the model's last import, each with its fix.
                 const std::vector<std::string>& warns = doc.importWarnings(ip.model);
@@ -14545,6 +14603,21 @@ static void reimportNow(State& st, editor::Document& doc, const std::filesystem:
 // join the import queue (see updateImports); one already waiting there is
 // not queued twice.
 static void updateModels(State& st, editor::Document& doc) {
+    // A pivot the inspector's Import settings asked for last frame.
+    if (std::optional<State::ImportPanel::PivotRequest> pr = std::exchange(st.importPanel.pivotRequest, std::nullopt)) {
+        const splash::Object* o = doc.object(pr->path);
+        const std::string mesh = o && o->mesh ? o->mesh->mesh : std::string();
+        std::string err;
+        if (editor::setPivot(doc, pr->path, editor::PivotMode(pr->mode), pr->at, &err)) {
+            notify(st, "Pivot set on " + mesh, false);
+            st.importPanel.pivotCustom = false;
+            scriptLine(nullptr, "pivot: set " + mesh);
+        } else {
+            notify(st, "Pivot not set: " + err, true);
+            scriptLine(nullptr, "pivot: refused " + err);
+        }
+        st.importPanel.checked = -1;
+    }
     std::vector<State::Reimport> todo;
     todo.swap(st.reimports);
     const double now = ImGui::GetTime();
