@@ -317,6 +317,9 @@ public:
     // as it comes and undoes as one step (none when nothing ran). Not nested.
     void beginBatch();
     void endBatch();
+    // Closes the open batch taking back what it did, last to first, with no
+    // undo step (an edit that failed halfway).
+    void cancelBatch();
 
     bool canUndo() const { return m_cursor > 0; }
     bool canRedo() const { return m_cursor < m_history.size(); }

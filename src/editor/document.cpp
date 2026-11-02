@@ -630,6 +630,16 @@ void Document::endBatch() {
     if (!parts.empty()) record(std::make_unique<GroupCommand>(std::move(parts)), false);
 }
 
+void Document::cancelBatch() {
+    if (!m_batch) return;
+    std::vector<std::unique_ptr<Command>> parts = std::move(*m_batch);
+    m_batch.reset();
+    if (parts.empty()) return;
+    for (auto it = parts.rbegin(); it != parts.rend(); ++it) (*it)->revert(*this);
+    refill();
+    ++m_revision;
+}
+
 void Document::record(std::unique_ptr<Command> cmd, bool mergeable) {
     if (mergeable && m_mergeOpen && m_cursor > 0 && m_cursor == m_history.size() && m_history[m_cursor - 1]->merge(*cmd)) {
         // The merged step no longer matches what was saved, if it was the saved one.

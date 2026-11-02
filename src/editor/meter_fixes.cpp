@@ -345,6 +345,19 @@ bool applySimplify(Document& doc, const MeterFix& fix, std::string* error) {
         return fail(e.what());
     }
     if (settings.targetTriangles == fix.target) return false;
+    settings.targetTriangles = fix.target;
+    return reimportWithSettings(doc, model, settings, {}, error);
+}
+
+}  // namespace
+
+bool reimportWithSettings(Document& doc, const fs::path& model, const splash::ImportSettings& settings,
+                          const std::function<void()>& sceneFirst, std::string* error) {
+    auto fail = [&](const std::string& e) {
+        if (error) *error = e;
+        return false;
+    };
+    const fs::path root = doc.projectRoot();
     const auto before = modelFiles(root, model);
     // Everything as it was, for an import that did not work out.
     auto putBack = [&] {
@@ -360,23 +373,25 @@ bool applySimplify(Document& doc, const MeterFix& fix, std::string* error) {
         std::erase_if(recheck, [](const std::string& r) { return !r.ends_with(".mesh") && !r.ends_with(".png") && !r.ends_with(".anim"); });
         doc.refreshAssets(recheck);
     };
-    settings.targetTriangles = fix.target;
-    try {
-        splash::saveImportSettings(model, settings);
-    } catch (const std::exception& e) {
-        putBack();
-        return fail(std::string("the import settings were not saved: ") + e.what());
-    }
     auto warnings = std::make_unique<ImportWarningsCommand>();
     warnings->model = model;
     warnings->before = doc.importWarnings(model);
-    // The scene step the import makes (materials and node transforms, when
-    // they changed), the files it wrote and its warnings: one undo step.
-    // Undo goes last to first: warnings, files, then the scene.
+    // The scene edits made first, the scene step the import makes (materials
+    // and node transforms, when they changed), the files it wrote and its
+    // warnings: one undo step. Undo goes last to first: warnings, files, then
+    // the scene. A failure takes back what the batch did, leaving no step.
     doc.beginBatch();
+    if (sceneFirst) sceneFirst();
+    try {
+        splash::saveImportSettings(model, settings);
+    } catch (const std::exception& e) {
+        doc.cancelBatch();
+        putBack();
+        return fail(std::string("the import settings were not saved: ") + e.what());
+    }
     const Reimported r = reimportModel(doc, model);
     if (!r.error.empty()) {
-        doc.endBatch();
+        doc.cancelBatch();
         putBack();
         doc.setImportWarnings(model, warnings->before);
         return fail(r.error);
@@ -398,8 +413,6 @@ bool applySimplify(Document& doc, const MeterFix& fix, std::string* error) {
     doc.endBatch();
     return true;
 }
-
-}  // namespace
 
 void applyFix(splash::Scene& scene, const MeterFix& fix) {
     fixSettings(scene.settings, fix);
