@@ -309,6 +309,8 @@ public:
     const std::string& prefabFile() const { return m_prefabFile; }
     // The scene (or prefab) that closePrefab() goes back to.
     std::string outerName() const { return m_outer ? m_outer->m_stem : std::string(); }
+    // That document itself, held while a prefab is open; null outside prefab mode.
+    const Document* outerDocument() const { return m_outer.get(); }
 
     // Applies `cmd` and pushes it, dropping anything that could be redone.
     // With `mergeable`, it may fold into the previous command (see Command::merge).

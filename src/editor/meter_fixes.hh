@@ -29,10 +29,11 @@ namespace editor {
 // and imports it again, as one undo step together with `sceneFirst`'s edits
 // (made through the document before the import, which then sees them): the
 // scene changes, every file the import rewrote (sidecar included) and its
-// warnings. On failure, with `error` set, the scene, the files and the
-// warnings are as before and there is no undo step.
+// warnings. `sceneFirst` returns an error to stop there. On failure, with
+// `error` set, the scene, the files and the warnings are as before and there
+// is no undo step.
 bool reimportWithSettings(Document& doc, const std::filesystem::path& model, const splash::ImportSettings& settings,
-                          const std::function<void()>& sceneFirst, std::string* error);
+                          const std::function<std::string()>& sceneFirst, std::string* error);
 
 enum class FixMeter { Vram = 0, Ram = 1, Tris = 2 };
 constexpr int kFixMeters = 3;
