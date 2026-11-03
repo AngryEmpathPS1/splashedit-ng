@@ -504,6 +504,8 @@ jobs:
             Windows)
               (cd pkg/redux && cmake -E tar xf ../../redux-download)
               cp build/Release/splashedit.exe pkg/
+              # Export Standalone Player copies it to <title>.exe (core/player.hh).
+              cp build/Release/splashedit-player-launcher.exe pkg/
               # The Start menu tile: Windows reads it from beside the exe, under the exe's name.
               cp packaging/windows/splashedit.VisualElementsManifest.xml pkg/
               # The editor and redux both import the MSVC runtime, which a

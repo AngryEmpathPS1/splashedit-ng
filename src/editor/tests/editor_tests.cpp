@@ -19363,6 +19363,37 @@ void testStandalonePlayer() {
         CHECK(in.error.find("inside the pcsx-redux") != std::string::npos && !fs::exists(r / "player"));
     }
 
+    // Windows with the launcher (kLauncherStub): <title>.exe, a copy of it,
+    // and config/launch.txt naming what it starts.
+    {
+        const fs::path r = dir / "win" / "redux";
+        const fs::path stub = dir / "stub" / splash::kLauncherStub;
+        write(stub, std::string("MZ stub\0launcher", 16));
+        const fs::path out = dir / "out-exe";
+        splash::PlayerResult p = splash::writePlayer(bin, r / "pcsx-redux.main", out, "My: Game", stub);
+        CHECK(p.error.empty() && p.warnings.empty() && p.os == splash::PlayerOs::Windows);
+        CHECK(p.launcher == out / "My Game.exe");
+        CHECK(read(p.launcher) == read(stub) && read(p.launcher).size() == 16);
+        CHECK(read(out / "config" / "launch.txt") == "redux/pcsx-redux.exe\ngame/My Game.cue\nconfig\n");
+        CHECK(read(out / splash::kPlayerMarker) == "game\nredux\nconfig\nMy Game.exe\n");
+        CHECK(!fs::exists(out / "My Game.bat") && gameCopied(out) && seeded(out) && read(out / "redux" / "pcsx-redux.exe") == "exe");
+        // Over it with the stub gone: the .bat, with a warning; the .exe goes.
+        splash::PlayerResult bat = splash::writePlayer(bin, r / "pcsx-redux.main", out, "My Game", dir / "stub" / "gone.exe");
+        CHECK(bat.error.empty() && bat.launcher == out / "My Game.bat" && fs::is_regular_file(bat.launcher));
+        CHECK(bat.warnings.size() == 1 && bat.warnings[0].find("gone.exe is missing: the player starts from a .bat") != std::string::npos);
+        CHECK(!fs::exists(out / "My Game.exe") && !fs::exists(out / "config" / "launch.txt"));
+        CHECK(read(out / splash::kPlayerMarker) == "game\nredux\nconfig\nMy Game.bat\n");
+#ifndef _WIN32
+        // An icon off Windows: the .exe all the same, the stub's icon kept, saying so.
+        const std::vector<uint32_t> icon(256, 0xff0000ffu);
+        splash::PlayerResult ic = splash::writePlayer(bin, r / "pcsx-redux.main", dir / "out-exe-icon", "My Game", stub, &icon);
+        CHECK(ic.error.empty() && ic.launcher == dir / "out-exe-icon" / "My Game.exe" && read(ic.launcher) == read(stub));
+        CHECK(ic.warnings.size() == 1 && ic.warnings[0].find("keeps the default icon") != std::string::npos);
+        std::string error;
+        CHECK(!splash::setExeIcon(ic.launcher, icon, error) && error.find("Windows only") != std::string::npos);
+#endif
+    }
+
     // macOS: the .app around the program.
     {
         const fs::path app = dir / "mac" / "PCSX-Redux.app";
@@ -19464,6 +19495,42 @@ void testStandalonePlayer() {
         splash::writePlayer(dir / "disc" / "gone.bin", dir / "img" / "pcsx-redux-x86_64.AppImage", dir / "out-nodisc", "My Game");
     CHECK(nodisc.error.find("disc image not found") != std::string::npos && !fs::exists(dir / "out-nodisc"));
 }
+
+#ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+
+#include "exe_icons.hh"
+
+// splash::setExeIcon on a copy of the launcher: icon group 1 lists the 16, 32
+// and 48 pixel images, the launcher's own icons gone and its manifest kept,
+// the colours and the transparent texel as given.
+void testPlayerExeIcon() {
+    namespace fs = std::filesystem;
+    const fs::path dir = g_outDir / "player-icon";
+    fs::remove_all(dir);
+    fs::create_directories(dir);
+    const fs::path exe = dir / "My Game.exe";
+    fs::copy_file(fs::path(SPLASHEDIT_PLAYER_LAUNCHER), exe);
+    const ExeIcons before = exeIcons(exe.c_str());
+    CHECK(before.icons > 3);
+    std::vector<uint32_t> icon(256, 0xff00ff00u);
+    icon[0] = 0xff0000ffu;  // red, 0xAABBGGRR
+    icon[15] = 0;
+    std::string error;
+    CHECK(splash::setExeIcon(exe, icon, error) && error.empty());
+    const ExeIcons got = exeIcons(exe.c_str());
+    CHECK(got.sizes == std::vector<int>({16, 32, 48}) && got.icons == 3);
+    CHECK(got.topLeft == 0xffff0000u && got.topRightClear);
+    CHECK(got.manifest == before.manifest);
+    CHECK(!splash::setExeIcon(exe, std::vector<uint32_t>(10), error) && error.find("16x16") != std::string::npos);
+}
+#endif
 
 int main(int argc, char** argv) {
     std::error_code ec;
@@ -19655,6 +19722,9 @@ int main(int argc, char** argv) {
     testAudioFormats();
     testDiscMusic();
     testStandalonePlayer();
+#ifdef _WIN32
+    testPlayerExeIcon();
+#endif
     testMeshColours();
     testVertexPaintEncoding();
     testVertexPaintSave();

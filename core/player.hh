@@ -3,6 +3,7 @@
 // opens a bin/cue in an emulator themselves (splashedit-ng#151).
 #pragma once
 
+#include <cstdint>
 #include <filesystem>
 #include <string>
 #include <vector>
@@ -47,6 +48,20 @@ std::string playerFileName(const std::string& title, bool ascii = false);
 std::string launcherName(const std::string& title, PlayerOs os);
 std::string launcherText(PlayerOs os, const std::string& exe, const std::string& cue, const std::string& config);
 
+// The Windows launcher (tools/player_launcher), shipped beside splashedit.exe:
+// copied to <title>.exe, it reads config/launch.txt (launchConfig) and starts
+// pcsx-redux as the .bat would, under the icon setExeIcon gives it.
+inline constexpr const char* kLauncherStub = "splashedit-player-launcher.exe";
+// config/launch.txt: the program, the cue and the config folder, a line each,
+// relative to the player folder ('/' separators).
+std::string launchConfig(const std::string& exe, const std::string& cue, const std::string& config);
+
+// Makes `rgba16` (16x16 texels, top row first, 0xAABBGGRR, alpha below 128
+// transparent) the icon of the program `exe`: 16, 32 and 48 pixel images,
+// nearest-neighbour, in icon group 1 (what Explorer shows), in place of the
+// icons it had. Windows only: elsewhere false with `error` set.
+bool setExeIcon(const std::filesystem::path& exe, const std::vector<uint32_t>& rgba16, std::string& error);
+
 // The pcsx.json a player folder starts with: no first-run "Update
 // configuration" dialog over the game, no update checks.
 std::string seededReduxConfig();
@@ -64,6 +79,10 @@ std::string playerDirError(const std::filesystem::path& out);
 //   config/pcsx.json      seededReduxConfig;
 //   <title>.bat|.command|.sh  the launcher, executable;
 //   .splashedit-player    the marker.
+// For Windows, with `launcherStub` (a kLauncherStub) there, the launcher is
+// <title>.exe, a copy of it, beside config/launch.txt, with the icon `icon`
+// when given (see setExeIcon; nullptr keeps the stub's). An empty
+// `launcherStub` writes the .bat; a missing one too, with a warning.
 // A previous player export there has what its marker lists removed first;
 // anything else in it is left. `out` must pass playerDirError and not lie
 // inside what is copied. `error` empty means it was written; `warnings` say
@@ -76,6 +95,7 @@ struct PlayerResult {
     PlayerOs os = PlayerOs::Linux;
 };
 PlayerResult writePlayer(const std::filesystem::path& bin, const std::filesystem::path& redux,
-                         const std::filesystem::path& out, const std::string& title);
+                         const std::filesystem::path& out, const std::string& title,
+                         const std::filesystem::path& launcherStub = {}, const std::vector<uint32_t>* icon = nullptr);
 
 }  // namespace splash

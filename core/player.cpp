@@ -8,6 +8,16 @@
 #include <string_view>
 #include <system_error>
 
+#ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+#endif
+
 namespace fs = std::filesystem;
 
 namespace splash {
@@ -182,6 +192,147 @@ std::string launcherText(PlayerOs os, const std::string& exe, const std::string&
            "\n";
 }
 
+std::string launchConfig(const std::string& exe, const std::string& cue, const std::string& config) {
+    return "redux/" + exe + "\n" + cue + "\n" + config + "\n";
+}
+
+#ifdef _WIN32
+namespace {
+
+void put16(std::vector<uint8_t>& b, uint32_t v) {
+    b.push_back(uint8_t(v));
+    b.push_back(uint8_t(v >> 8));
+}
+void put32(std::vector<uint8_t>& b, uint32_t v) {
+    put16(b, v & 0xffff);
+    put16(b, v >> 16);
+}
+
+// One RT_ICON image, `n` pixels square: a BITMAPINFOHEADER (the height
+// doubled for the mask), 32-bit BGRA rows bottom up, then the 1-bit AND mask.
+std::vector<uint8_t> iconImage(const std::vector<uint32_t>& rgba16, int n) {
+    auto at = [&](int x, int y) { return rgba16[size_t(y * 16 / n) * 16 + size_t(x * 16 / n)]; };
+    std::vector<uint8_t> b;
+    put32(b, 40);
+    put32(b, uint32_t(n));
+    put32(b, uint32_t(2 * n));
+    put16(b, 1);
+    put16(b, 32);
+    for (int i = 0; i < 6; ++i) put32(b, 0);  // BI_RGB, no size, resolution or palette
+    for (int y = n - 1; y >= 0; --y)
+        for (int x = 0; x < n; ++x) {
+            const uint32_t c = at(x, y);
+            const bool opaque = (c >> 24) >= 128;
+            b.push_back(opaque ? uint8_t(c >> 16) : 0);
+            b.push_back(opaque ? uint8_t(c >> 8) : 0);
+            b.push_back(opaque ? uint8_t(c) : 0);
+            b.push_back(uint8_t(opaque ? 255 : 0));
+        }
+    const size_t stride = size_t(n + 31) / 32 * 4;
+    for (int y = n - 1; y >= 0; --y) {
+        std::vector<uint8_t> row(stride, 0);
+        for (int x = 0; x < n; ++x)
+            if ((at(x, y) >> 24) < 128) row[size_t(x / 8)] |= uint8_t(0x80 >> (x % 8));
+        b.insert(b.end(), row.begin(), row.end());
+    }
+    return b;
+}
+
+// RT_ICON and RT_GROUP_ICON for the W functions (windows.h gives them as char*).
+const LPCWSTR kRtIcon = MAKEINTRESOURCEW(3), kRtGroupIcon = MAKEINTRESOURCEW(14);
+
+// A resource id: a number, or a name.
+struct ResId {
+    WORD id = 0;
+    std::wstring name;
+    explicit ResId(LPCWSTR s) {
+        if (IS_INTRESOURCE(s)) id = WORD(reinterpret_cast<ULONG_PTR>(s));
+        else name = s;
+    }
+    LPCWSTR get() const { return name.empty() ? MAKEINTRESOURCEW(id) : name.c_str(); }
+};
+// The resources a program keeps when its icons are replaced: all but the icons.
+struct Kept {
+    ResId type, name;
+    WORD lang;
+    std::vector<uint8_t> data;
+};
+BOOL CALLBACK keptLanguage(HMODULE m, LPCWSTR type, LPCWSTR name, WORD lang, LONG_PTR p) {
+    HRSRC r = FindResourceExW(m, type, name, lang);
+    const auto* d = r ? static_cast<const uint8_t*>(LockResource(LoadResource(m, r))) : nullptr;
+    if (d) reinterpret_cast<std::vector<Kept>*>(p)->push_back({ResId(type), ResId(name), lang, {d, d + SizeofResource(m, r)}});
+    return TRUE;
+}
+BOOL CALLBACK keptName(HMODULE m, LPCWSTR type, LPWSTR name, LONG_PTR p) {
+    EnumResourceLanguagesW(m, type, name, keptLanguage, p);
+    return TRUE;
+}
+BOOL CALLBACK keptType(HMODULE m, LPWSTR type, LONG_PTR p) {
+    if (type != kRtIcon && type != kRtGroupIcon) EnumResourceNamesW(m, type, keptName, p);
+    return TRUE;
+}
+
+}  // namespace
+#endif
+
+bool setExeIcon(const fs::path& exe, const std::vector<uint32_t>& rgba16, std::string& error) {
+    if (rgba16.size() != size_t(16 * 16)) {
+        error = "the icon is not 16x16";
+        return false;
+    }
+#ifdef _WIN32
+    // Every resource goes and all but the icons come back, so none of the
+    // stub's icons is left behind ours (deleting them one by one through
+    // UpdateResourceW does nothing under Wine).
+    std::vector<Kept> kept;
+    if (HMODULE m = LoadLibraryExW(exe.c_str(), nullptr, LOAD_LIBRARY_AS_DATAFILE)) {
+        EnumResourceTypesW(m, keptType, reinterpret_cast<LONG_PTR>(&kept));
+        FreeLibrary(m);
+    } else {
+        error = "cannot read " + utf8(exe) + " (error " + std::to_string(GetLastError()) + ")";
+        return false;
+    }
+    HANDLE h = BeginUpdateResourceW(exe.c_str(), TRUE);
+    if (!h) {
+        error = "cannot change " + utf8(exe) + " (error " + std::to_string(GetLastError()) + ")";
+        return false;
+    }
+    bool ok = true;
+    for (Kept& k : kept)
+        ok = ok && UpdateResourceW(h, k.type.get(), k.name.get(), k.lang, k.data.data(), DWORD(k.data.size()));
+    const WORD lang = MAKELANGID(LANG_NEUTRAL, SUBLANG_NEUTRAL);
+    // GRPICONDIR then a GRPICONDIRENTRY per image, naming its RT_ICON id.
+    std::vector<uint8_t> group;
+    put16(group, 0);
+    put16(group, 1);
+    put16(group, 3);
+    WORD id = 1;
+    for (int n : {16, 32, 48}) {
+        std::vector<uint8_t> image = iconImage(rgba16, n);
+        ok = ok && UpdateResourceW(h, kRtIcon, MAKEINTRESOURCEW(id), lang, image.data(), DWORD(image.size()));
+        group.push_back(uint8_t(n));
+        group.push_back(uint8_t(n));
+        group.push_back(0);
+        group.push_back(0);
+        put16(group, 1);
+        put16(group, 32);
+        put32(group, uint32_t(image.size()));
+        put16(group, id++);
+    }
+    ok = ok && UpdateResourceW(h, kRtGroupIcon, MAKEINTRESOURCEW(1), lang, group.data(), DWORD(group.size()));
+    const DWORD failed = ok ? 0 : GetLastError();
+    if (!EndUpdateResourceW(h, ok ? FALSE : TRUE) || !ok) {
+        error = "cannot set the icon of " + utf8(exe) + " (error " + std::to_string(ok ? GetLastError() : failed) + ")";
+        return false;
+    }
+    return true;
+#else
+    (void)exe;
+    error = "a program's icon is set on Windows only";
+    return false;
+#endif
+}
+
 std::string seededReduxConfig() { return "{\"emulator\":{\"ShownAutoUpdateConfig\":true,\"AutoUpdate\":false}}\n"; }
 
 std::string playerDirError(const fs::path& out) {
@@ -195,7 +346,8 @@ std::string playerDirError(const fs::path& out) {
     return {};
 }
 
-PlayerResult writePlayer(const fs::path& bin, const fs::path& redux, const fs::path& out, const std::string& title) {
+PlayerResult writePlayer(const fs::path& bin, const fs::path& redux, const fs::path& out, const std::string& title,
+                         const fs::path& launcherStub, const std::vector<uint32_t>* icon) {
     PlayerResult r;
     ReduxInstall ri;
     if (!findReduxInstall(redux, ri, r.error)) return r;
@@ -253,9 +405,21 @@ PlayerResult writePlayer(const fs::path& bin, const fs::path& redux, const fs::p
         fs::create_directories(out / "config");
         writeText(out / "config" / "pcsx.json", seededReduxConfig());
 
-        const std::string launcher = launcherName(title, ri.os);
+        const std::string cueRel = "game/" + utf8(cue.filename());
+        const bool stub = ri.os == PlayerOs::Windows && !launcherStub.empty() && fs::is_regular_file(launcherStub, ec);
+        if (ri.os == PlayerOs::Windows && !launcherStub.empty() && !stub)
+            r.warnings.push_back("the player launcher " + utf8(launcherStub) +
+                                 " is missing: the player starts from a .bat instead, without the game's icon");
+        const std::string launcher = stub ? playerFileName(title) + ".exe" : launcherName(title, ri.os);
         r.launcher = out / fromUtf8(launcher);
-        writeText(r.launcher, launcherText(ri.os, ri.exe, "game/" + utf8(cue.filename()), "config"));
+        if (stub) {
+            fs::copy_file(launcherStub, r.launcher, fs::copy_options::overwrite_existing);
+            writeText(out / "config" / "launch.txt", launchConfig(ri.exe, cueRel, "config"));
+            if (std::string e; icon && !setExeIcon(r.launcher, *icon, e))
+                r.warnings.push_back("the player keeps the default icon: " + e);
+        } else {
+            writeText(r.launcher, launcherText(ri.os, ri.exe, cueRel, "config"));
+        }
         if (ri.os != PlayerOs::Windows) makeExecutable(r.launcher);
         writeText(out / kPlayerMarker, "game\nredux\nconfig\n" + launcher + "\n");
     } catch (const std::exception& e) {
