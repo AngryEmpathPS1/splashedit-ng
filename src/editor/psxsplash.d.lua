@@ -1173,7 +1173,7 @@ function Cutscene.IsPlaying() end
 ---@class Movie
 Movie = {}
 
---- `Movie.Play(name) or Movie.Play(name, {skip=bool, loop=bool, overlay=bool, x=n, y=n, speed=1|2, behind=element, onComplete=fn(result), thenScene=n, rgb24=bool}) -> queued`
+--- `Movie.Play(name) or Movie.Play(name, {skip=bool, loop=bool, overlay=bool, x=n, y=n, speed=1|2, behind=element, onComplete=fn(result, shown, dropped), thenScene=n, rgb24=bool}) -> queued`
 ---@param name any
 ---@overload fun(name: any, tbl: any): any
 ---@return any # queued
@@ -1186,6 +1186,10 @@ function Movie.IsPlaying() end
 --- `Movie.Frame() -> frames shown`
 ---@return any # frames shown
 function Movie.Frame() end
+
+--- `Movie.ReadSpeed() -> 1|2, the drive's speed now (0 without one)`
+---@return any # 1|2, the drive's speed now (0 without one)
+function Movie.ReadSpeed() end
 
 --- `Movie.PlayOn(entity or UI image, name) or Movie.PlayOn(entity or UI image, name, {fps=n, loop=bool, onComplete=fn}) -> started`
 ---@param entity any
