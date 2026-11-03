@@ -80,6 +80,7 @@
 #include "ui/colour_hex.hh"
 #include "budget.hh"
 #include "disc.hh"
+#include "player.hh"
 #include "licencesim.hh"
 #include "licencetmd.hh"
 #include "font.hh"
@@ -93,6 +94,8 @@
 #include "worldstream.hh"
 #include "gpu_raster.hh"
 #include "gpudump.hh"
+
+#include <nlohmann/json.hpp>
 
 namespace {
 
@@ -19290,6 +19293,178 @@ static void testTvPreview() {
     CHECK(tv::lookFromName("bogus") == tv::Look::RGB);
 }
 
+// splash::writePlayer over each kind of pcsx-redux install, with stand-in
+// files: what is copied, the launcher each writes, the seeded pcsx.json, a
+// previous export written over and a folder that is neither refused.
+void testStandalonePlayer() {
+    namespace fs = std::filesystem;
+    const fs::path dir = g_outDir / "player";
+    fs::remove_all(dir);
+    fs::create_directories(dir / "disc");
+    auto write = [](const fs::path& p, const std::string& text) {
+        fs::create_directories(p.parent_path());
+        std::ofstream(p, std::ios::binary) << text;
+    };
+    auto read = [](const fs::path& p) {
+        std::ifstream in(p, std::ios::binary);
+        return std::string((std::istreambuf_iterator<char>(in)), {});
+    };
+    auto executable = [](const fs::path& p) {
+#ifdef _WIN32
+        (void)p;
+        return true;
+#else
+        std::error_code ec;
+        return (fs::status(p, ec).permissions() & fs::perms::owner_exec) != fs::perms::none;
+#endif
+    };
+    const fs::path bin = dir / "disc" / "My Game.bin";
+    write(bin, "raw sectors");
+    write(dir / "disc" / "My Game.cue", "FILE \"My Game.bin\" BINARY\n");
+    auto seeded = [&](const fs::path& out) {
+        const nlohmann::json j = nlohmann::json::parse(read(out / "config" / "pcsx.json"), nullptr, false);
+        return j.is_object() && j["emulator"]["ShownAutoUpdateConfig"] == true && j["emulator"]["AutoUpdate"] == false;
+    };
+    auto gameCopied = [&](const fs::path& out) {
+        return read(out / "game" / "My Game.bin") == "raw sectors" &&
+               read(out / "game" / "My Game.cue") == "FILE \"My Game.bin\" BINARY\n";
+    };
+
+    CHECK(splash::playerFileName("My: Game?") == "My Game");
+    CHECK(splash::playerFileName(" ..\"$`%!*") == "Game");
+    CHECK(splash::playerFileName("nul") == "nul Game" && splash::playerFileName("Con.txt") == "Con.txt Game");
+    CHECK(splash::playerFileName("Caf\xc3\xa9 ok.") == "Caf\xc3\xa9 ok" && splash::playerFileName("Caf\xc3\xa9", true) == "Caf");
+
+    // Windows: Play runs pcsx-redux.main (editor::withDefaults); the whole folder goes, the .exe is started.
+    {
+        const fs::path r = dir / "win" / "redux";
+        write(r / "pcsx-redux.exe", "exe");
+        write(r / "pcsx-redux.main", "main");
+        write(r / "SDL3.dll", "dll");
+        write(r / "share" / "fonts.dat", "fonts");
+        splash::ReduxInstall ri;
+        std::string error;
+        CHECK(splash::findReduxInstall(r / "pcsx-redux.main", ri, error));
+        CHECK(ri.kind == splash::ReduxKind::Folder && ri.exe == "pcsx-redux.exe" && ri.os == splash::PlayerOs::Windows);
+        const fs::path out = dir / "out-win";
+        splash::PlayerResult p = splash::writePlayer(bin, r / "pcsx-redux.main", out, "My Game");
+        CHECK(p.error.empty() && p.warnings.empty() && p.os == splash::PlayerOs::Windows);
+        CHECK(p.launcher == out / "My Game.bat");
+        CHECK(read(out / "redux" / "pcsx-redux.exe") == "exe" && read(out / "redux" / "pcsx-redux.main") == "main" &&
+              read(out / "redux" / "SDL3.dll") == "dll" && read(out / "redux" / "share" / "fonts.dat") == "fonts");
+        CHECK(gameCopied(out) && seeded(out));
+        const std::string bat = read(p.launcher);
+        CHECK(bat.rfind("@echo off\r\n", 0) == 0);
+        CHECK(bat.find("start \"\" \"%~dp0redux\\pcsx-redux.exe\" -kiosk -run -iso \"%~dp0game\\My Game.cue\" -portable "
+                       "\"%~dp0config\"\r\n") != std::string::npos);
+        CHECK(fs::is_regular_file(out / splash::kPlayerMarker));
+        // The player folder inside the folder it copies would copy itself.
+        splash::PlayerResult in = splash::writePlayer(bin, r / "pcsx-redux.exe", r / "player", "My Game");
+        CHECK(in.error.find("inside the pcsx-redux") != std::string::npos && !fs::exists(r / "player"));
+    }
+
+    // macOS: the .app around the program.
+    {
+        const fs::path app = dir / "mac" / "PCSX-Redux.app";
+        write(app / "Contents" / "MacOS" / "PCSX-Redux", "macho");
+        write(app / "Contents" / "Info.plist", "plist");
+        write(app / "Contents" / "Frameworks" / "libSDL3.dylib", "dylib");
+        const fs::path out = dir / "out-mac";
+        splash::PlayerResult p = splash::writePlayer(bin, app / "Contents" / "MacOS" / "PCSX-Redux", out, "My Game");
+        CHECK(p.error.empty() && p.os == splash::PlayerOs::Mac && p.launcher == out / "My Game.command");
+        const fs::path copied = out / "redux" / "PCSX-Redux.app" / "Contents";
+        CHECK(read(copied / "MacOS" / "PCSX-Redux") == "macho" && read(copied / "Info.plist") == "plist" &&
+              read(copied / "Frameworks" / "libSDL3.dylib") == "dylib");
+        CHECK(gameCopied(out) && seeded(out) && executable(p.launcher) && executable(copied / "MacOS" / "PCSX-Redux"));
+        const std::string sh = read(p.launcher);
+        CHECK(sh.rfind("#!/bin/sh\n", 0) == 0 && sh.find("here=$(cd \"$(dirname \"$0\")\" && pwd)\n") != std::string::npos);
+        CHECK(sh.find("exec \"$here\"/\"redux/PCSX-Redux.app/Contents/MacOS/PCSX-Redux\" -kiosk -run -iso "
+                      "\"$here\"/\"game/My Game.cue\" -portable \"$here\"/\"config\"\n") != std::string::npos);
+    }
+
+    // Linux: redux/pcsx-redux -> pcsx-redux.AppDir/AppRun -> usr/bin/pcsx-redux, as the bundle has it.
+    {
+        const fs::path r = dir / "lin" / "redux";
+        write(r / "pcsx-redux.AppDir" / "usr" / "bin" / "pcsx-redux", "elf");
+        write(r / "pcsx-redux.AppDir" / "usr" / "lib" / "libfoo.so", "so");
+        std::error_code ec;
+        fs::create_symlink("usr/bin/pcsx-redux", r / "pcsx-redux.AppDir" / "AppRun", ec);
+        if (!ec) fs::create_symlink("pcsx-redux.AppDir/AppRun", r / "pcsx-redux", ec);
+        if (ec) {
+            std::fprintf(stderr, "testStandalonePlayer: no symlinks here (%s), AppDir case skipped\n", ec.message().c_str());
+        } else {
+            splash::ReduxInstall ri;
+            std::string error;
+            CHECK(splash::findReduxInstall(r / "pcsx-redux", ri, error) && ri.kind == splash::ReduxKind::AppDir &&
+                  ri.exe == "pcsx-redux.AppDir/AppRun" && ri.os == splash::PlayerOs::Linux);
+            // The AppRun itself (an extracted AppImage) is the same install.
+            CHECK(splash::findReduxInstall(r / "pcsx-redux.AppDir" / "AppRun", ri, error) &&
+                  ri.kind == splash::ReduxKind::AppDir && ri.root.filename() == "pcsx-redux.AppDir");
+            const fs::path out = dir / "out-lin";
+            splash::PlayerResult p = splash::writePlayer(bin, r / "pcsx-redux", out, "My Game");
+            CHECK(p.error.empty() && p.warnings.empty() && p.os == splash::PlayerOs::Linux && p.launcher == out / "My Game.sh");
+            const fs::path appdir = out / "redux" / "pcsx-redux.AppDir";
+            CHECK(fs::is_symlink(appdir / "AppRun") && fs::read_symlink(appdir / "AppRun") == "usr/bin/pcsx-redux");
+            CHECK(read(appdir / "AppRun") == "elf" && read(appdir / "usr" / "lib" / "libfoo.so") == "so");
+            CHECK(!fs::exists(out / "redux" / "pcsx-redux"));  // the AppDir, not the bundle's folder
+            CHECK(gameCopied(out) && seeded(out) && executable(p.launcher));
+            CHECK(read(p.launcher).find("exec \"$here\"/\"redux/pcsx-redux.AppDir/AppRun\" -kiosk -run -iso "
+                                        "\"$here\"/\"game/My Game.cue\" -portable \"$here\"/\"config\"\n") !=
+                  std::string::npos);
+
+            // Written again under another title: what the first export wrote
+            // is replaced, a file someone added stays.
+            write(out / "config" / "memcard1.mcd", "card");
+            write(out / "README.txt", "readme");
+            splash::PlayerResult again = splash::writePlayer(bin, r / "pcsx-redux", out, "Other");
+            CHECK(again.error.empty() && again.launcher == out / "Other.sh");
+            CHECK(!fs::exists(out / "My Game.sh") && !fs::exists(out / "config" / "memcard1.mcd") && seeded(out));
+            CHECK(read(out / "README.txt") == "readme");
+        }
+    }
+
+    // Anything else (an AppImage) is copied on its own.
+    {
+        const fs::path img = dir / "img" / "pcsx-redux-x86_64.AppImage";
+        write(img, std::string("\x7f" "ELF\x02\x01\x01\0AI\x02", 11) + "rest");
+        const fs::path out = dir / "out-img";
+        splash::PlayerResult p = splash::writePlayer(bin, img, out, "My Game");
+        CHECK(p.error.empty());
+        CHECK(read(out / "redux" / "pcsx-redux-x86_64.AppImage").size() == 15 && executable(out / "redux" / "pcsx-redux-x86_64.AppImage"));
+        CHECK(gameCopied(out) && seeded(out) && executable(p.launcher));
+#if !defined(_WIN32) && !defined(__APPLE__)
+        CHECK(p.launcher == out / "My Game.sh" && p.warnings.size() == 1 && p.warnings[0].find("FUSE") != std::string::npos);
+        CHECK(read(p.launcher).find("exec \"$here\"/\"redux/pcsx-redux-x86_64.AppImage\" -kiosk -run -iso ") != std::string::npos);
+#endif
+        // Not an AppImage: the libraries it needs are not copied with it, so it says so.
+        write(dir / "plain" / "pcsx-redux", "elf");
+        splash::PlayerResult lone = splash::writePlayer(bin, dir / "plain" / "pcsx-redux", dir / "out-plain", "My Game");
+        CHECK(lone.error.empty() && lone.warnings.size() == 1 && lone.warnings[0].find("libraries") != std::string::npos);
+    }
+
+    // A folder holding anything but a player export is refused, and left as it was.
+    {
+        const fs::path out = dir / "foreign";
+        write(out / "notes.txt", "mine");
+        CHECK(splash::playerDirError(out).find("not empty") != std::string::npos);
+        splash::PlayerResult p = splash::writePlayer(bin, dir / "img" / "pcsx-redux-x86_64.AppImage", out, "My Game");
+        CHECK(p.error.find("not empty") != std::string::npos && p.launcher.empty());
+        CHECK(!fs::exists(out / "game") && !fs::exists(out / "redux") && read(out / "notes.txt") == "mine");
+        write(dir / "afile", "x");
+        CHECK(splash::playerDirError(dir / "afile").find("not a folder") != std::string::npos);
+        CHECK(splash::playerDirError(dir / "missing").empty());
+        fs::create_directories(dir / "empty");
+        CHECK(splash::playerDirError(dir / "empty").empty());
+    }
+
+    // No pcsx-redux, or no disc.
+    splash::PlayerResult none = splash::writePlayer(bin, dir / "nothing" / "pcsx-redux", dir / "out-none", "My Game");
+    CHECK(none.error.find("pcsx-redux not found") != std::string::npos && !fs::exists(dir / "out-none"));
+    splash::PlayerResult nodisc =
+        splash::writePlayer(dir / "disc" / "gone.bin", dir / "img" / "pcsx-redux-x86_64.AppImage", dir / "out-nodisc", "My Game");
+    CHECK(nodisc.error.find("disc image not found") != std::string::npos && !fs::exists(dir / "out-nodisc"));
+}
+
 int main(int argc, char** argv) {
     std::error_code ec;
     std::filesystem::path exe = argc > 0 ? std::filesystem::absolute(argv[0], ec) : std::filesystem::path();
@@ -19479,6 +19654,7 @@ int main(int argc, char** argv) {
     testWavInfo();
     testAudioFormats();
     testDiscMusic();
+    testStandalonePlayer();
     testMeshColours();
     testVertexPaintEncoding();
     testVertexPaintSave();

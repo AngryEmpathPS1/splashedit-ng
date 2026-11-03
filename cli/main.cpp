@@ -9,6 +9,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iterator>
+#include <random>
 #include <stdexcept>
 #include <vector>
 #include <string>
@@ -24,6 +25,7 @@
 #include "import.hh"
 #include "licencesim.hh"
 #include "licencetmd.hh"
+#include "player.hh"
 #include "splashpack.hh"
 #include "texture.hh"
 #include "unity_import.hh"
@@ -108,6 +110,14 @@ static int usage() {
                  "  --track adds a CD-DA music track (WAV, AIFF, MP3, Ogg Vorbis or FLAC; relative to the\n"
                  "    working directory), tracks 2 and up in the order given (Audio.PlayCDDA(2) plays the\n"
                  "    first); any --track replaces disc.json's list\n"
+                 "usage: splashpack-cli player <scene>... --engine <psxsplash.ps-exe> --redux <pcsx-redux> -o <dir>\n"
+                 "    [--title <name>] [--project <dir>]\n"
+                 "  writes a standalone player to hand out: <dir>/game holds the disc image (built as disc\n"
+                 "  does, disc.json from --project), <dir>/redux a copy of the pcsx-redux install (the folder\n"
+                 "  of a .exe, the .app, the AppDir of an AppRun, or an AppImage on its own), <dir>/config its\n"
+                 "  settings, and <title>.bat, .command or .sh starts the game in pcsx-redux's kiosk mode; the\n"
+                 "  player runs on the system that pcsx-redux is for; --title (default the first scene's file\n"
+                 "  name) names the launcher and the disc; <dir> must be empty, missing or a player export\n"
                  "usage: splashpack-cli licence --out <file> [--tmd <file>] [--top <text>] [--bottom <text>]\n"
                  "    [--from <file|psxsplash>] [--region japan|america|europe]\n"
                  "  builds a 12-sector licence file (28032 bytes, for --licence) from a TMD logo (flat\n"
@@ -795,8 +805,93 @@ static int discCmd(int argc, char** argv) {
     }
 }
 
+static int playerCmd(int argc, char** argv) {
+    std::vector<std::string> scenePaths;
+    std::string outPath, project, engine, redux, title;
+    for (int i = 2; i < argc; i++) {
+        std::string a = argv[i];
+        if (a == "-o" && i + 1 < argc)
+            outPath = argv[++i];
+        else if (a == "--project" && i + 1 < argc)
+            project = argv[++i];
+        else if (a == "--engine" && i + 1 < argc)
+            engine = argv[++i];
+        else if (a == "--redux" && i + 1 < argc)
+            redux = argv[++i];
+        else if (a == "--title" && i + 1 < argc)
+            title = argv[++i];
+        else if (!a.empty() && a[0] != '-')
+            scenePaths.push_back(a);
+        else
+            return usage();
+    }
+    if (scenePaths.empty() || outPath.empty() || engine.empty() || redux.empty()) return usage();
+    // Refused before anything is built.
+    if (std::string e = splash::playerDirError(outPath); !e.empty()) {
+        std::fprintf(stderr, "error: %s\n", e.c_str());
+        return 1;
+    }
+    {
+        std::string e;
+        splash::ReduxInstall ri;
+        if (!splash::findReduxInstall(redux, ri, e)) {
+            std::fprintf(stderr, "error: %s\n", e.c_str());
+            return 1;
+        }
+    }
+    std::vector<splash::Scene> scenes;
+    std::vector<std::string> names;
+    for (const std::string& path : scenePaths) {
+        try {
+            scenes.push_back(splash::loadScene(path));
+            names.push_back(fs::path(path).stem().string());
+        } catch (const std::exception& e) {
+            std::fprintf(stderr, "error: %s: %s\n", path.c_str(), e.what());
+            return 1;
+        }
+    }
+    if (title.empty()) title = names.front();
+    // The disc is built in a scratch folder, then copied into the player.
+    std::error_code ec;
+    const fs::path scratch = fs::temp_directory_path(ec) / ("splashedit-player-" + std::to_string(std::random_device()()));
+    try {
+        fs::create_directories(scratch);
+        std::vector<const splash::Scene*> ptrs;
+        for (const splash::Scene& s : scenes) ptrs.push_back(&s);
+        fs::path root = project.empty() ? fs::path(scenePaths.front()).parent_path() : fs::path(project);
+        splash::DiscSettings disc;
+        if (!project.empty()) disc = splash::readDiscSettings(root / "disc.json");
+        const std::string file = splash::playerFileName(title, true) + ".bin";
+        const fs::path bin = scratch / fs::path(std::u8string(file.begin(), file.end()));
+        splash::DiscResult r = splash::exportDisc(ptrs, root, engine, bin, title, names,
+                                                  splash::readVramSettings(root / "vram.json"), disc);
+        for (auto& m : r.exported.warnings) std::fprintf(stderr, "warning: %s\n", m.c_str());
+        for (auto& m : r.exported.errors) std::fprintf(stderr, "error: %s\n", m.c_str());
+        if (!r.exported.ok()) {
+            fs::remove_all(scratch, ec);
+            return 1;
+        }
+        splash::PlayerResult p = splash::writePlayer(bin, redux, outPath, title);
+        fs::remove_all(scratch, ec);
+        for (auto& m : p.warnings) std::fprintf(stderr, "warning: %s\n", m.c_str());
+        if (!p.error.empty()) {
+            std::fprintf(stderr, "error: %s\n", p.error.c_str());
+            return 1;
+        }
+        std::u8string l = p.launcher.u8string();
+        std::printf("%s sectors=%u\n", std::string(l.begin(), l.end()).c_str(), r.disc.sectors);
+        printRaised(r.exported.stats);
+        return 0;
+    } catch (const std::exception& e) {
+        fs::remove_all(scratch, ec);
+        std::fprintf(stderr, "error: %s\n", e.what());
+        return 1;
+    }
+}
+
 int main(int argc, char** argv) {
     if (argc >= 2 && std::strcmp(argv[1], "disc") == 0) return discCmd(argc, argv);
+    if (argc >= 2 && std::strcmp(argv[1], "player") == 0) return playerCmd(argc, argv);
     if (argc >= 2 && std::strcmp(argv[1], "licence") == 0) return licenceCmd(argc, argv);
     if (argc >= 2 && std::strcmp(argv[1], "build") == 0) return buildCmd(argc, argv);
     if (argc >= 2 && std::strcmp(argv[1], "font") == 0) return font(argc, argv);
