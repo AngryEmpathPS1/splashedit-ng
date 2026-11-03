@@ -2450,8 +2450,9 @@ void testEngineLoaderNote() {
     CHECK(editor::engineLoaderNote(cdrom, true).empty());
     const std::string play = editor::engineLoaderNote(cdrom, false);
     CHECK(play.find("cdrom.ps-exe is the CD-ROM build") == 0);
-    CHECK(play.find("boot logo") != std::string::npos);
-    CHECK(editor::engineLoaderNote(pcdrv, true).find("pcdrv.ps-exe is the PCdrv build") == 0);
+    CHECK(play.find("boot logo") != std::string::npos && play.find("psxsplash.ps-exe from running xmake") != std::string::npos);
+    CHECK(editor::engineLoaderNote(pcdrv, true).find("pcdrv.ps-exe is the PCdrv build") == 0 &&
+          editor::engineLoaderNote(pcdrv, true).find("psxsplash-cdrom.ps-exe from running xmake") != std::string::npos);
     CHECK(editor::engineLoaderNote(neither, false).empty());
     CHECK(editor::engineLoaderNote(neither, true).empty());
     CHECK(editor::engineLoaderNote(dir / "missing.ps-exe", false).empty());
@@ -2525,7 +2526,8 @@ void testPlayOverlays() {
     CHECK(miss.size() == 1 && miss[0].find("room debug overlay") != std::string::npos &&
           miss[0].find("psxsplash-rooms.ps-exe") != std::string::npos);
     // It says how to make one, naming only the flag that overlay needs.
-    CHECK(miss.size() == 1 && miss[0].find("with ROOMDEBUG=1 and save it under that name") != std::string::npos &&
+    CHECK(miss.size() == 1 && miss[0].find("Running xmake in psxsplash builds it under that name") != std::string::npos &&
+          miss[0].find("with ROOMDEBUG=1 and save it under that name") != std::string::npos &&
           miss[0].find("FPSOVERLAY") == std::string::npos);
     CHECK(hwMiss.size() == 1 && hwMiss[0].find("psxsplash-rooms.ps-exe") != std::string::npos);
     CHECK(editor::missingDiscTools(eff).empty());
