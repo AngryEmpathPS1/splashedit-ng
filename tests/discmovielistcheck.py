@@ -87,6 +87,20 @@ check('a file that is gone says so', 'disc movies: gone.str missing' in movies, 
 check('a file that is no movie says so', 'disc movies: junk.str not a movie' in movies, movies)
 check('a name the disc cannot hold says so', 'disc movies: awfullylongname.str name too long' in movies, movies)
 
+# Subtitles: an .srt beside its movie says how many it shows and how many the player leaves out; one with no
+# movie of its name says so.
+SRT = (b'1\r\n00:00:00,500 --> 00:00:02,000\r\nA line\r\n\r\n'
+       b'2\r\n00:00:02,500 --> 00:00:03,000\r\nTwo\r\nrows\r\n\r\n'
+       b'3\r\n00:00:03,500 -> 00:00:04,000\r\nNo arrow\r\n')
+subs = dict(disc_json(['intro.str']), **{'intro.srt': SRT, 'lone.srt': SRT[:44]})
+movies, lines, data, controls = run(click('disc.addmovie') + click('disc.addmovie/intro.srt'), subs)
+check('adding subtitles writes them to disc.json', (data or {}).get('movies') == ['intro.str', 'intro.srt'], data)
+check('subtitles say how many show and how many are left out', 'disc movies: intro.srt 2 subtitles, 1 left out' in movies, movies)
+movies, lines, data, controls = run([], dict(disc_json(['intro.str', 'lone.srt']), **{'lone.srt': SRT[:44]}))
+check('subtitles with no movie of their name say so', 'disc movies: lone.srt no movie of this name' in movies, movies)
+movies, lines, data, controls = run([], dict(disc_json(['intro.str', 'intro.srt']), **{'intro.srt': SRT[:44]}))
+check('one good subtitle says so', 'disc movies: intro.srt 1 subtitle' in movies, movies)
+
 movies, lines, data, controls = run(click('disc.singlespeed'), disc_json(['intro.str']))
 check('the single speed switch is drawn', 'disc.singlespeed' in controls, sorted(controls))
 check('the switch writes it to disc.json', (data or {}).get('singleSpeed') is True, data)

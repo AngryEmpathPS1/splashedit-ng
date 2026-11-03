@@ -9282,13 +9282,15 @@ static void sceneInspector(State& st, ImDrawList* dl, ImRect r, float y, editor:
                         if (!movie) {
                             d = "no movie of this name";
                         } else if (!info.leftOut.empty()) {
-                            std::snprintf(b, sizeof b, "%u subtitles, %zu left out", info.subtitles, info.leftOut.size());
+                            std::snprintf(b, sizeof b, "%u subtitle%s, %zu left out", info.subtitles, info.subtitles == 1 ? "" : "s",
+                                          info.leftOut.size());
                             d = b;
                         } else if (!info.wide.empty()) {
-                            std::snprintf(b, sizeof b, "%u subtitles, %zu too wide", info.subtitles, info.wide.size());
+                            std::snprintf(b, sizeof b, "%u subtitle%s, %zu too wide", info.subtitles, info.subtitles == 1 ? "" : "s",
+                                          info.wide.size());
                             d = b;
                         } else {
-                            std::snprintf(b, sizeof b, "%u subtitles", info.subtitles);
+                            std::snprintf(b, sizeof b, "%u subtitle%s", info.subtitles, info.subtitles == 1 ? "" : "s");
                             d = b;
                             bad = false;
                         }
