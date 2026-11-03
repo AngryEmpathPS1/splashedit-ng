@@ -352,7 +352,7 @@ bool applySimplify(Document& doc, const MeterFix& fix, std::string* error) {
 }  // namespace
 
 bool reimportWithSettings(Document& doc, const fs::path& model, const splash::ImportSettings& settings,
-                          const std::function<void()>& sceneFirst, std::string* error) {
+                          const std::function<std::string()>& sceneFirst, std::string* error) {
     auto fail = [&](const std::string& e) {
         if (error) *error = e;
         return false;
@@ -381,7 +381,11 @@ bool reimportWithSettings(Document& doc, const fs::path& model, const splash::Im
     // warnings: one undo step. Undo goes last to first: warnings, files, then
     // the scene. A failure takes back what the batch did, leaving no step.
     doc.beginBatch();
-    if (sceneFirst) sceneFirst();
+    if (sceneFirst)
+        if (std::string why = sceneFirst(); !why.empty()) {
+            doc.cancelBatch();
+            return fail(why);
+        }
     try {
         splash::saveImportSettings(model, settings);
     } catch (const std::exception& e) {
