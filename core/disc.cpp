@@ -828,7 +828,10 @@ void readSubtitles(const std::vector<uint8_t>& file, MovieInfo& info) {
         number++;
         bool digits = true;
         for (const char* c = from; c < to; c++) digits = digits && *c >= '0' && *c <= '9';
-        if (digits && !srtLine(s, end, from, to)) break;
+        if (digits && !srtLine(s, end, from, to)) {
+            info.leftOut.push_back(number);
+            break;
+        }
         uint32_t a = 0, b = 0;
         const char* p = from;
         bool ok = srtTime(p, to, a);
@@ -1038,12 +1041,16 @@ DiscResult exportDisc(const std::vector<const Scene*>& scenes, const fs::path& p
         }
         if (lowerExtension(p) != ".srt") continue;
         const MovieInfo info = movieInfo(p);
+        const bool manyOut = info.leftOut.size() > 1, manyWide = info.wide.size() > 1;
         if (!info.leftOut.empty())
-            r.exported.warnings.push_back(tag + "subtitle " + numbers(info.leftOut) +
-                                          " has no time line (00:00:01,500 --> 00:00:04,000) and text: the player leaves it out");
+            r.exported.warnings.push_back(tag + (manyOut ? "subtitles " : "subtitle ") + numbers(info.leftOut) +
+                                          (manyOut ? " have" : " has") +
+                                          " no time line (00:00:01,500 --> 00:00:04,000) and text: the player leaves " +
+                                          (manyOut ? "them" : "it") + " out");
         if (!info.wide.empty())
-            r.exported.warnings.push_back(tag + "subtitle " + numbers(info.wide) +
-                                          " has more than two rows of 40 characters: the rest is off screen");
+            r.exported.warnings.push_back(tag + (manyWide ? "subtitles " : "subtitle ") + numbers(info.wide) +
+                                          (manyWide ? " have" : " has") +
+                                          " more than two rows of 40 characters: the rest is off screen");
         const std::string str = movies.back().path.substr(0, movies.back().path.size() - 3) + "STR";
         bool shown = false;
         for (const std::string& o : disc.movies) {

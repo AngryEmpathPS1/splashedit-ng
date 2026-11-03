@@ -120,7 +120,8 @@ check('a .sbs is plain data at its own size', size4 == len(sbs) and sector(lba4)
 # leaves out, what runs off the screen, and subtitles with no movie of their name are warnings, not errors.
 srt = ('1\r\n00:00:00,500 --> 00:00:02,000\r\nA line\r\n\r\n'
        '2\r\n00:00:02,500 -> 00:00:03,000\r\nNo arrow\r\n\r\n'
-       '3\r\n00:00:03,500 --> 00:00:05,000\r\nOne\r\nTwo\r\nThree rows\r\n').encode()
+       '3\r\n00:00:03,500 --> 00:00:05,000\r\nOne\r\nTwo\r\nThree rows\r\n\r\n'
+       'a stray line at the end\r\nand its text\r\n').encode()   # block 4: the player skips it, as here
 open(os.path.join(tmp, 'intro.srt'), 'wb').write(srt)
 open(os.path.join(tmp, 'lone.srt'), 'wb').write(srt[:44])
 subbin = os.path.join(tmp, 'sub.bin')
@@ -134,7 +135,7 @@ if r.returncode == 0:
     lba5, size5, _ = movies.get('INTRO.SRT;1', (0, 0, 0))
     check('an .srt is plain data at its own size, beside its movie', size5 == len(srt) and sector(lba5)[24:24 + len(srt)] == srt,
           sorted(movies))
-    check('a block the player leaves out is named', 'intro.srt: subtitle 2 has no time line' in r.stderr, r.stderr)
+    check('blocks the player leaves out are named, a trailing one too', 'intro.srt: subtitles 2, 4 have no time line' in r.stderr, r.stderr)
     check('more than two rows is named', 'intro.srt: subtitle 3 has more than two rows' in r.stderr, r.stderr)
     check('subtitles with no movie of their name are named', 'lone.srt: no movie of its name' in r.stderr, r.stderr)
     check('subtitles over their movie are not', 'intro.srt: no movie' not in r.stderr, r.stderr)
