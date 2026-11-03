@@ -124,6 +124,10 @@ std::optional<FileSwapsCommand::File> moveFile(const fs::path& root, const fs::p
     std::string before;
     if (!readBytes(file, &before)) throw std::runtime_error("could not read " + rel);
     const bool prefab = isPrefabFile(file);
+    // A Unity prefab copied into the project (YAML) cannot place our meshes.
+    if (prefab && before.find_first_not_of(" \t\r\n\xef\xbb\xbf") != std::string::npos &&
+        before.compare(before.find_first_not_of(" \t\r\n\xef\xbb\xbf"), 5, "%YAML") == 0)
+        return std::nullopt;
     splash::Scene stored;
     splash::ExtraKeys prefabExtra;
     try {

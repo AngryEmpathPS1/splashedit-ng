@@ -4565,9 +4565,14 @@ void testSetPivotBrokenFile() {
     CHECK(doc.historySize() == steps);
     for (const std::string& f : files)
         if (f != "levels/broken.scene") CHECK(bytes(p.proj / f) == before[f]);
-    // Gone, it goes through.
+    // Gone, it goes through, and a Unity (YAML) prefab beside ours is left alone.
     std::filesystem::remove(p.proj / "prefabs" / "notone.prefab");
+    const std::string unity = "%YAML 1.1\n%TAG !u! tag:unity3d.com,2011:\n--- !u!1 &1\nGameObject:\n  m_Name: Crate\n";
+    std::ofstream(p.proj / "prefabs" / "unity.prefab", std::ios::binary) << unity;
+    err.clear();
     CHECK(editor::setPivot(doc, {0}, editor::PivotMode::BottomCentre, {}, &err));
+    if (!err.empty()) std::fprintf(stderr, "  setPivot with a Unity prefab: %s\n", err.c_str());
+    CHECK(bytes(p.proj / "prefabs" / "unity.prefab") == unity);
     CHECK(same(worldIn(p, doc.scene()), open));
 }
 
