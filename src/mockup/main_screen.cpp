@@ -2155,7 +2155,8 @@ static void buildPlayer(State& st, const editor::Document& doc, const std::files
     p.playerLaunch = launchOf(files, openSceneFile(doc));
     const editor::PlayTools tools = editor::withDefaults(p.tools, p.bundleDir);
     p.player = std::async(std::launch::async, [files = std::move(files), open = openSceneFile(doc), scene = doc.scene(), root = doc.projectRoot(),
-                                               engine = tools.disc, redux = tools.redux, out, title = playerTitle(doc)] {
+                                               engine = tools.disc, redux = tools.redux, out, title = playerTitle(doc),
+                                               stub = p.bundleDir.empty() ? std::filesystem::path() : p.bundleDir / splash::kLauncherStub] {
         State::Play::PlayerExport x;
         if (const std::string e = splash::playerDirError(out); !e.empty()) {
             x.disc.exported.errors.push_back(e);
@@ -2179,7 +2180,10 @@ static void buildPlayer(State& st, const editor::Document& doc, const std::files
         if (const std::string n = editor::engineLoaderNote(exe, true); x.disc.exported.ok() && !n.empty())
             x.disc.exported.warnings.push_back(n);
         if (x.disc.exported.ok()) {
-            splash::PlayerResult r = splash::writePlayer(bin, redux, out, title);
+            // The Windows launcher wears the memory card icon's first frame, as the console draws it.
+            const editor::MemCardIcon icon = editor::memCardIcon(scene.settings.memCard.icons, root);
+            const bool iconed = !icon.frames.empty() && icon.frames[0].error.empty();
+            splash::PlayerResult r = splash::writePlayer(bin, redux, out, title, stub, iconed ? &icon.frames[0].rgba : nullptr);
             for (std::string& w : r.warnings) x.disc.exported.warnings.push_back(std::move(w));
             if (!r.error.empty()) x.disc.exported.errors.push_back(std::move(r.error));
             x.launcher = r.launcher;

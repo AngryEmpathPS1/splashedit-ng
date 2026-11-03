@@ -805,6 +805,9 @@ static int discCmd(int argc, char** argv) {
     }
 }
 
+// The folder this program is in (defined at the end, after windows.h).
+static fs::path selfDir(const char* argv0);
+
 static int playerCmd(int argc, char** argv) {
     std::vector<std::string> scenePaths;
     std::string outPath, project, engine, redux, title;
@@ -871,7 +874,9 @@ static int playerCmd(int argc, char** argv) {
             fs::remove_all(scratch, ec);
             return 1;
         }
-        splash::PlayerResult p = splash::writePlayer(bin, redux, outPath, title);
+        const fs::path self = selfDir(argv[0]);
+        splash::PlayerResult p =
+            splash::writePlayer(bin, redux, outPath, title, self.empty() ? fs::path() : self / splash::kLauncherStub);
         fs::remove_all(scratch, ec);
         for (auto& m : p.warnings) std::fprintf(stderr, "warning: %s\n", m.c_str());
         if (!p.error.empty()) {
@@ -1027,4 +1032,33 @@ int main(int argc, char** argv) {
         std::fprintf(stderr, "error: %s\n", e.what());
         return 1;
     }
+}
+
+#ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+#endif
+
+static fs::path selfDir(const char* argv0) {
+    std::error_code ec;
+#if defined(_WIN32)
+    (void)argv0;
+    std::wstring w(32768, L'\0');
+    const DWORD n = GetModuleFileNameW(nullptr, w.data(), DWORD(w.size()));
+    if (n == 0 || n >= w.size()) return {};
+    w.resize(n);
+    return fs::path(w).parent_path();
+#elif defined(__linux__)
+    (void)argv0;
+    const fs::path self = fs::read_symlink("/proc/self/exe", ec);
+    return ec ? fs::path() : self.parent_path();
+#else
+    const fs::path self = fs::absolute(argv0, ec);
+    return ec || !fs::path(argv0).has_parent_path() ? fs::path() : self.parent_path();
+#endif
 }

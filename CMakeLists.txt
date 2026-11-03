@@ -84,6 +84,25 @@ else()
     target_compile_options(make_templates PRIVATE -Wall -Wextra)
 endif()
 
+# The Windows standalone player's <title>.exe (core/player.hh kLauncherStub),
+# shipped beside splashedit.exe.
+if(WIN32)
+    set(SPLASHEDIT_ICON "${CMAKE_CURRENT_SOURCE_DIR}/assets/brand/icon.ico")
+    configure_file(tools/player_launcher/launcher.rc.in ${CMAKE_CURRENT_BINARY_DIR}/player_launcher.rc @ONLY)
+    add_executable(splashedit-player-launcher WIN32 tools/player_launcher/launcher.c ${CMAKE_CURRENT_BINARY_DIR}/player_launcher.rc)
+    target_link_libraries(splashedit-player-launcher PRIVATE kernel32 user32)
+    if(MINGW)
+        target_link_options(splashedit-player-launcher PRIVATE -municode)
+    endif()
+    if(MSVC)
+        # The player folder has no MSVC runtime beside it: the static one.
+        set_target_properties(splashedit-player-launcher PROPERTIES MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+        target_compile_options(splashedit-player-launcher PRIVATE /W4)
+    else()
+        target_compile_options(splashedit-player-launcher PRIVATE -Wall -Wextra)
+    endif()
+endif()
+
 # The editor's document model (history, picking): no SDL or GL, so it builds
 # and tests headless, also with SPLASHEDIT_BUILD_EDITOR off.
 add_library(splasheditdoc STATIC
@@ -154,6 +173,11 @@ else()
     target_compile_options(editor_tests PRIVATE -Wall -Wextra)
 endif()
 add_test(NAME editor_tests COMMAND editor_tests)
+if(WIN32)
+    # The icon test (testPlayerExeIcon) works on a copy of the launcher.
+    add_dependencies(editor_tests splashedit-player-launcher)
+    target_compile_definitions(editor_tests PRIVATE SPLASHEDIT_PLAYER_LAUNCHER="$<TARGET_FILE:splashedit-player-launcher>")
+endif()
 
 if(NOT SPLASHEDIT_BUILD_EDITOR)
     return()

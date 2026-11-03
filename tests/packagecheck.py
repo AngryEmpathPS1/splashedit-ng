@@ -5,7 +5,8 @@ Every OS: the packaged editor's --version, read through a pipe, names an
 assets folder inside the package (so the editor finds what it ships with).
 Windows: splashedit.exe is a windowed program (no console window) and carries
 an icon and version details, and its Start tile manifest sits beside it with
-the logos it names. macOS: SplashEdit.app is a bundle Finder can open,
+the logos it names; the standalone player's launcher, beside it, is windowed
+with an icon too. macOS: SplashEdit.app is a bundle Finder can open,
 with its icon. Linux: the desktop entry is valid and install-desktop-entry.sh
 puts it, with an absolute Exec path and the icons, in the user's menu.
 
@@ -74,6 +75,15 @@ def windows(pkg):
     check(16 in types and "SplashEdit".encode("utf-16-le") in data, "splashedit.exe carries version details")
     version(exe, os.path.join(pkg, "assets"))
     visualElements(pkg, exe)
+    # The standalone player's launcher, copied to <title>.exe by Export Standalone Player.
+    stub = os.path.join(pkg, "splashedit-player-launcher.exe")
+    check(os.path.isfile(stub), "splashedit-player-launcher.exe ships beside splashedit.exe")
+    if os.path.isfile(stub):
+        subsystem, types, data = peResources(stub)
+        check(subsystem == 2, f"the player launcher is a windowed program (subsystem {subsystem})")
+        check(14 in types, "the player launcher carries an icon")
+        # A player folder has no MSVC runtime beside the launcher.
+        check(b"vcruntime140" not in data.lower(), "the player launcher needs no MSVC runtime DLL")
 
 
 def visualElements(pkg, exe):
