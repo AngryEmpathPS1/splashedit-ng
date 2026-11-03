@@ -785,8 +785,80 @@ void movieLayout(const uint8_t* in, size_t size, size_t& stride, size_t& skip) {
 
 bool isMovieFile(const fs::path& file) {
     const std::string ext = lowerExtension(file);
-    return ext == ".str" || ext == ".sbs";
+    return ext == ".str" || ext == ".sbs" || ext == ".srt";
 }
+
+namespace {
+
+// psxsplash's src/movieplayer.cpp, line for line: what its player does with each block of an .SRT.
+bool srtTime(const char*& p, const char* end, uint32_t& ms) {
+    uint32_t v[4] = {};
+    while (p < end && *p == ' ') p++;
+    for (int i = 0; i < 4; i++) {
+        if (p >= end || *p < '0' || *p > '9') return false;
+        while (p < end && *p >= '0' && *p <= '9') v[i] = v[i] * 10 + uint32_t(*p++ - '0');
+        if (i < 3) {
+            if (p >= end || (*p != (i < 2 ? ':' : ',') && !(i == 2 && *p == '.'))) return false;
+            p++;
+        }
+    }
+    if (v[1] > 59 || v[2] > 59 || v[3] > 999) return false;
+    ms = ((v[0] * 60 + v[1]) * 60 + v[2]) * 1000 + v[3];
+    return true;
+}
+
+bool srtLine(const char*& p, const char* end, const char*& from, const char*& to) {
+    if (p >= end) return false;
+    from = p;
+    while (p < end && *p != '\n') p++;
+    to = p;
+    if (to > from && to[-1] == '\r') to--;
+    if (p < end) p++;
+    return true;
+}
+
+void readSubtitles(const std::vector<uint8_t>& file, MovieInfo& info) {
+    const char* s = reinterpret_cast<const char*>(file.data());
+    const char* end = s + file.size();
+    if (file.size() >= 3 && file[0] == 0xef && file[1] == 0xbb && file[2] == 0xbf) s += 3;
+    uint32_t number = 0;
+    const char *from = nullptr, *to = nullptr;
+    while (srtLine(s, end, from, to)) {
+        if (from == to) continue;
+        number++;
+        bool digits = true;
+        for (const char* c = from; c < to; c++) digits = digits && *c >= '0' && *c <= '9';
+        if (digits && !srtLine(s, end, from, to)) break;
+        uint32_t a = 0, b = 0;
+        const char* p = from;
+        bool ok = srtTime(p, to, a);
+        while (ok && p < to && *p == ' ') p++;
+        ok = ok && to - p >= 3 && p[0] == '-' && p[1] == '-' && p[2] == '>';
+        p += 3;
+        ok = ok && srtTime(p, to, b) && b > a;
+        unsigned rows = 0;
+        bool wide = false;
+        while (srtLine(s, end, from, to) && from != to) {
+            rows++;
+            wide = wide || to - from > 40;
+        }
+        if (!ok || !rows) {
+            info.leftOut.push_back(number);
+            continue;
+        }
+        info.subtitles++;
+        if (rows > 2 || wide) info.wide.push_back(number);
+    }
+}
+
+std::string numbers(const std::vector<uint32_t>& v) {
+    std::string out;
+    for (size_t i = 0; i < v.size() && i < 8; i++) out += (i ? ", " : "") + std::to_string(v[i]);
+    if (v.size() > 8) out += " and " + std::to_string(v.size() - 8) + " more";
+    return out;
+}
+
+}  // namespace
 
 bool movieNameFits(const fs::path& file) {
     std::string stem = utf8(file.stem());
@@ -801,6 +873,12 @@ MovieInfo movieInfo(const fs::path& file) {
     const uintmax_t bytes = fs::file_size(file, ec);
     std::ifstream in(file, std::ios::binary);
     if (ec || !in) return info;
+    if (lowerExtension(file) == ".srt") {
+        info.ok = info.srt = true;
+        info.sectors = uint32_t((bytes + kSector - 1) / kSector);
+        readSubtitles(readFile(file), info);
+        return info;
+    }
     std::vector<uint8_t> head(size_t(std::min<uintmax_t>(bytes, 32 * kRawSectorSize)));
     in.read(reinterpret_cast<char*>(head.data()), std::streamsize(head.size()));
     if (!in) return info;
@@ -832,6 +910,9 @@ DiscFile loadMovie(const fs::path& file) {
     std::string stem = utf8(file.stem());
     for (char& ch : stem)
         if (ch >= 'a' && ch <= 'z') ch = char(ch - 32);
+
+    // Subtitles for the movie of the same name: plain data, read by the player.
+    if (lowerExtension(file) == ".srt") return {"MOVIES/" + stem + ".SRT", in, false};
 
     // A row of BS frames for a mesh: plain data, every frame starts with this mark.
     if (lowerExtension(file) == ".sbs") {
@@ -953,7 +1034,26 @@ DiscResult exportDisc(const std::vector<const Scene*>& scenes, const fs::path& p
             movies.push_back(loadMovie(p));
         } catch (const std::exception& e) {
             r.exported.errors.push_back(tag + e.what());
+            continue;
         }
+        if (lowerExtension(p) != ".srt") continue;
+        const MovieInfo info = movieInfo(p);
+        if (!info.leftOut.empty())
+            r.exported.warnings.push_back(tag + "subtitle " + numbers(info.leftOut) +
+                                          " has no time line (00:00:01,500 --> 00:00:04,000) and text: the player leaves it out");
+        if (!info.wide.empty())
+            r.exported.warnings.push_back(tag + "subtitle " + numbers(info.wide) +
+                                          " has more than two rows of 40 characters: the rest is off screen");
+        const std::string str = movies.back().path.substr(0, movies.back().path.size() - 3) + "STR";
+        bool shown = false;
+        for (const std::string& o : disc.movies) {
+            const fs::path q = fs::path(std::u8string(o.begin(), o.end()));
+            std::string stem = utf8(q.stem());
+            for (char& ch : stem)
+                if (ch >= 'a' && ch <= 'z') ch = char(ch - 32);
+            shown = shown || ("MOVIES/" + stem + ".STR" == str && lowerExtension(q) == ".str");
+        }
+        if (!shown) r.exported.warnings.push_back(tag + "no movie of its name in the list, so nothing shows it");
     }
     // The engine reads this before it can read anything else, so it goes in the engine.
     if (disc.singleSpeed) {

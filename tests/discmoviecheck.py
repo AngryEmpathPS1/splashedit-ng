@@ -116,6 +116,30 @@ check('a video-only movie gets Form 1 subheaders', size3 == size and sector(lba3
 lba4, size4, _ = movies['TV.SBS;1']
 check('a .sbs is plain data at its own size', size4 == len(sbs) and sector(lba4)[24:24 + 1024] == sbs[:1024], size4)
 
+# Subtitles: an .srt in the list goes as plain data, MOVIES/<NAME>.SRT, read the way the player reads it. What it
+# leaves out, what runs off the screen, and subtitles with no movie of their name are warnings, not errors.
+srt = ('1\r\n00:00:00,500 --> 00:00:02,000\r\nA line\r\n\r\n'
+       '2\r\n00:00:02,500 -> 00:00:03,000\r\nNo arrow\r\n\r\n'
+       '3\r\n00:00:03,500 --> 00:00:05,000\r\nOne\r\nTwo\r\nThree rows\r\n').encode()
+open(os.path.join(tmp, 'intro.srt'), 'wb').write(srt)
+open(os.path.join(tmp, 'lone.srt'), 'wb').write(srt[:44])
+subbin = os.path.join(tmp, 'sub.bin')
+r = subprocess.run([cli, 'disc', scene, '--engine', engine, '-o', subbin, '--movie', os.path.join(tmp, 'intro.str'),
+                    '--movie', os.path.join(tmp, 'intro.srt'), '--movie', os.path.join(tmp, 'lone.srt')], capture_output=True, text=True)
+check('a disc with subtitles exits 0', r.returncode == 0, r.stderr)
+if r.returncode == 0:
+    raw = open(subbin, 'rb').read()
+    root = records(struct.unpack_from('<I', sector(16)[24:], 158)[0], struct.unpack_from('<I', sector(16)[24:], 166)[0])
+    movies = records(root['MOVIES'][0], root['MOVIES'][1])
+    lba5, size5, _ = movies.get('INTRO.SRT;1', (0, 0, 0))
+    check('an .srt is plain data at its own size, beside its movie', size5 == len(srt) and sector(lba5)[24:24 + len(srt)] == srt,
+          sorted(movies))
+    check('a block the player leaves out is named', 'intro.srt: subtitle 2 has no time line' in r.stderr, r.stderr)
+    check('more than two rows is named', 'intro.srt: subtitle 3 has more than two rows' in r.stderr, r.stderr)
+    check('subtitles with no movie of their name are named', 'lone.srt: no movie of its name' in r.stderr, r.stderr)
+    check('subtitles over their movie are not', 'intro.srt: no movie' not in r.stderr, r.stderr)
+    raw = open(binpath, 'rb').read()
+
 project = os.path.join(tmp, 'proj')
 shutil.copytree(os.path.dirname(scene), project)
 open(os.path.join(project, 'intro.str'), 'wb').write(str_2336)

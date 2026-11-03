@@ -154,16 +154,22 @@ constexpr size_t kMode2Sector = 2336;
 // (2336-byte sectors), -t strcd (2352, the sync and header dropped) or -t strv
 // (2048, video only, given Form 1 subheaders). A .sbs (psxavenc -t sbs) goes as
 // plain data, MOVIES/<STEM>.SBS, for Movie.PlayOn. The stem is upper-cased. Throws
-// std::runtime_error when the file is none of these or has no video sector.
+// std::runtime_error when the file is none of these or has no video sector. A .srt goes as plain data too,
+// MOVIES/<STEM>.SRT: the player shows it over the movie of the same name.
 DiscFile loadMovie(const std::filesystem::path& file);
 
 // What a movie file is, for a list, from its start alone: a long movie is not
 // read to draw a row. `ok` when loadMovie would take it by the look of it;
 // `sbs` when it is frames for Movie.PlayOn, whose size only the mesh it plays on
-// says. `sectors` are its sectors on the disc, 150 a second at double speed.
+// says. `sectors` are its sectors on the disc, 150 a second at double speed. For a .srt (`srt`), read whole as the
+// player reads it: the subtitles it shows, and by their number in the file the ones it leaves out (no time line
+// "00:00:01,500 --> 00:00:04,000" and text) and the ones wider than the screen's two rows of 40 characters.
 struct MovieInfo {
     bool ok = false;
     bool sbs = false;
+    bool srt = false;
+    uint32_t subtitles = 0;
+    std::vector<uint32_t> leftOut, wide;
     bool audio = false;
     uint32_t width = 0;
     uint32_t height = 0;
@@ -171,7 +177,7 @@ struct MovieInfo {
 };
 MovieInfo movieInfo(const std::filesystem::path& file);
 
-// A .str or .sbs file, whatever its case.
+// A .str, .sbs or .srt file, whatever its case.
 bool isMovieFile(const std::filesystem::path& file);
 // Whether the file's stem can be a name on the disc and in Movie.Play: A-Z, 0-9
 // and _ once upper-cased, 8 characters at most.

@@ -1173,7 +1173,7 @@ function Cutscene.IsPlaying() end
 ---@class Movie
 Movie = {}
 
---- `Movie.Play(name) or Movie.Play(name, {skip=bool, loop=bool, overlay=bool, x=n, y=n, speed=1|2, subtitles={{from, to, "line"}}, behind=element, onComplete=fn(result), thenScene=n, rgb24=bool}) -> queued`
+--- `Movie.Play(name) or Movie.Play(name, {skip=bool, loop=bool, overlay=bool, x=n, y=n, speed=1|2, behind=element, onComplete=fn(result), thenScene=n, rgb24=bool}) -> queued`
 ---@param name any
 ---@overload fun(name: any, tbl: any): any
 ---@return any # queued

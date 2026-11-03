@@ -2053,7 +2053,7 @@ static void SDLCALL onMoviePicked(void*, const char* const* files, int) {
     std::lock_guard<std::mutex> lock(g_movieMutex);
     g_moviePicked = files[0];
 }
-static const SDL_DialogFileFilter kMovieFilter[] = {{"Movies (STR, SBS)", "str;sbs"}, {"All files", "*"}};
+static const SDL_DialogFileFilter kMovieFilter[] = {{"Movies and subtitles (STR, SBS, SRT)", "str;sbs;srt"}, {"All files", "*"}};
 
 // A typed volume name character: upper-cased, dropped unless the volume name
 // keeps it (splash::volumeName's rule).
@@ -9265,6 +9265,33 @@ static void sceneInspector(State& st, ImDrawList* dl, ImRect r, float y, editor:
                     } else if (info.sbs) {
                         d = "for a mesh";
                         bad = false;
+                    } else if (info.srt) {
+                        // Subtitles show only over the movie of their name, and only what the player can read.
+                        const std::string stem = utf8(p.stem());
+                        bool movie = false;
+                        for (const std::string& o : movies) {
+                            const fs::path q(std::u8string(o.begin(), o.end()));
+                            std::string a = utf8(q.stem()), b = stem;
+                            for (char& ch : a) ch = char(std::toupper((unsigned char)ch));
+                            for (char& ch : b) ch = char(std::toupper((unsigned char)ch));
+                            std::string ext = utf8(q.extension());
+                            for (char& ch : ext) ch = char(std::tolower((unsigned char)ch));
+                            movie = movie || (a == b && ext == ".str");
+                        }
+                        char b[64];
+                        if (!movie) {
+                            d = "no movie of this name";
+                        } else if (!info.leftOut.empty()) {
+                            std::snprintf(b, sizeof b, "%u subtitles, %zu left out", info.subtitles, info.leftOut.size());
+                            d = b;
+                        } else if (!info.wide.empty()) {
+                            std::snprintf(b, sizeof b, "%u subtitles, %zu too wide", info.subtitles, info.wide.size());
+                            d = b;
+                        } else {
+                            std::snprintf(b, sizeof b, "%u subtitles", info.subtitles);
+                            d = b;
+                            bad = false;
+                        }
                     } else {
                         const long secs = long(info.sectors / 150);
                         char b[48];
@@ -9337,7 +9364,7 @@ static void sceneInspector(State& st, ImDrawList* dl, ImRect r, float y, editor:
             ui::showOpenFileDialog("movie", onMoviePicked, nullptr, kMovieFilter, 1, root.empty() ? nullptr : loc.c_str(), false);
         }
         y += size::field + space::xs + space::sm;
-        caption("Movies play from a disc image only: Movie.Play(\"INTRO\") plays intro.str, Movie.PlayOn a .sbs on a mesh.",
+        caption("Movies play from a disc image only: Movie.Play(\"INTRO\") plays intro.str, with intro.srt's subtitles when it is listed too; Movie.PlayOn a .sbs on a mesh.",
                 color::textFaint);
         caption("Make them with psxavenc: -t str for a movie with sound, -t sbs -a 1024 for a mesh.", color::textFaint);
         if (namedRectsOn() && ImGui::GetFrameCount() > 1 && !root.empty()) {
