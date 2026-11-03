@@ -15,6 +15,7 @@
 
 #include "blend.hh"
 #include "disc.hh"
+#include "player.hh"
 #include "unitymath.hh"
 #include "unity_import.hh"
 #include "editor/asset_browser_view.hh"
@@ -199,13 +200,22 @@ struct State {
         struct Launch {
             std::optional<std::string> openTag;
             size_t scenes = 0;
-        } playLaunch, hwLaunch, discLaunch;
+        } playLaunch, hwLaunch, discLaunch, playerLaunch;
         bool openSetup = false, openOutput = false;
         // Export (Ctrl+B): a disc image built in the background, where it goes,
         // and whether the setup popup was opened for it rather than for Play.
         std::future<splash::DiscResult> disc;
         std::filesystem::path discOut;
         std::filesystem::path discWritten;  // the last disc image Export wrote, for Show Disc Image in Folder
+        // Export Standalone Player: the disc and the player folder built in the
+        // background (the player's errors and warnings among the disc's) and
+        // the launcher it wrote, and the folder it goes in.
+        struct PlayerExport {
+            splash::DiscResult disc;
+            std::filesystem::path launcher;
+        };
+        std::future<PlayerExport> player;
+        std::filesystem::path playerOut;
         int setupFor = 0;  // which action the setup popup is for: 0 Play, 1 Export, 2 Run on hardware
         // Run on hardware (Ctrl+F5): the export it uploads, then the serial session.
         std::future<splash::ExportResult> hwBuild;
@@ -213,6 +223,7 @@ struct State {
         std::string hwPort;              // the port the session was started on
         std::vector<std::string> ports;  // serial ports found when the setup popup opened
         std::filesystem::path exportTo;  // screenshot mode: write here instead of asking
+        std::filesystem::path playerTo;  // the same for Export Standalone Player (a folder)
         // What the engine reported using in the last Play of scene `peakScene`
         // (Document::loadId), kept after it stops.
         std::optional<editor::RenderPeak> peak;

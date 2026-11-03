@@ -16,6 +16,7 @@
 #include <map>
 #include <mutex>
 #include <optional>
+#include <random>
 #include <set>
 #include <string>
 
@@ -1991,7 +1992,7 @@ static float centerY(ImFont* font, float size, float y0, float y1) {
 }
 
 // File dialogs answer on their own thread; the result is picked up next frame.
-enum class FileAsk { None, Open, SaveAs, ExportDisc };
+enum class FileAsk { None, Open, SaveAs, ExportDisc, ExportPlayer };
 static std::mutex g_fileMutex;
 static FileAsk g_fileAsk = FileAsk::None;
 static std::string g_filePath;
@@ -2129,6 +2130,104 @@ static void updateExport(State& st) {
     p.discWritten = p.discOut;
 }
 
+// What a project's standalone player is called: its folder's name, else the open scene's.
+static std::string playerTitle(const editor::Document& doc) {
+    const std::string name = utf8(doc.projectRoot().filename());
+    return name.empty() ? doc.sceneStem() : name;
+}
+
+// Why Export Standalone Player is off, or "" when it can run.
+static std::string playerExportOff(const State& st) {
+    splash::ReduxInstall ri;
+    std::string error;
+    if (!splash::findReduxInstall(editor::withDefaults(st.play.tools, st.play.bundleDir).redux, ri, error))
+        return "Needs pcsx-redux: " + error + ". The player copies the pcsx-redux Play uses, so it runs on this system only.";
+    return {};
+}
+
+// The disc as Export builds it, in a scratch folder, then the player folder
+// around it (splash::writePlayer), in the background.
+static void buildPlayer(State& st, const editor::Document& doc, const std::filesystem::path& out) {
+    State::Play& p = st.play;
+    p.playerOut = out;
+    std::vector<std::filesystem::path> files = editor::buildScenes(doc.projectRoot(), openSceneFile(doc));
+    p.built = {};
+    p.playerLaunch = launchOf(files, openSceneFile(doc));
+    const editor::PlayTools tools = editor::withDefaults(p.tools, p.bundleDir);
+    p.player = std::async(std::launch::async, [files = std::move(files), open = openSceneFile(doc), scene = doc.scene(), root = doc.projectRoot(),
+                                               engine = tools.disc, redux = tools.redux, out, title = playerTitle(doc)] {
+        State::Play::PlayerExport x;
+        if (const std::string e = splash::playerDirError(out); !e.empty()) {
+            x.disc.exported.errors.push_back(e);
+            return x;
+        }
+        editor::BuildScenes b = editor::loadBuildScenes(root, files, open, scene);
+        if (!b.errors.empty()) {
+            x.disc.exported.errors = std::move(b.errors);
+            return x;
+        }
+        std::error_code ec;
+        const std::filesystem::path scratch =
+            std::filesystem::temp_directory_path(ec) / ("splashedit-player-" + std::to_string(std::random_device()()));
+        std::filesystem::create_directories(scratch, ec);
+        const splash::DiscSettings ds = editor::loadDiscSettings(root);
+        std::string logoNote;
+        const std::filesystem::path exe = editor::discEngineFor(engine, ds.bootLogo, &logoNote);
+        const std::filesystem::path bin = scratch / fromUtf8(splash::playerFileName(title, true) + ".bin");
+        x.disc = splash::exportDisc(b.pointers(), root, exe, bin, title, b.names, editor::loadVramSettings(root), ds);
+        if (x.disc.exported.ok() && !logoNote.empty()) x.disc.exported.warnings.push_back(logoNote);
+        if (const std::string n = editor::engineLoaderNote(exe, true); x.disc.exported.ok() && !n.empty())
+            x.disc.exported.warnings.push_back(n);
+        if (x.disc.exported.ok()) {
+            splash::PlayerResult r = splash::writePlayer(bin, redux, out, title);
+            for (std::string& w : r.warnings) x.disc.exported.warnings.push_back(std::move(w));
+            if (!r.error.empty()) x.disc.exported.errors.push_back(std::move(r.error));
+            x.launcher = r.launcher;
+        }
+        std::filesystem::remove_all(scratch, ec);
+        return x;
+    });
+}
+
+static void startPlayerExport(State& st, const editor::Document& doc) {
+    State::Play& p = st.play;
+    if (p.player.valid() || doc.projectRoot().empty()) return;
+    if (const std::string off = playerExportOff(st); !off.empty()) {
+        notify(st, off, true);
+        return;
+    }
+    if (!editor::missingDiscTools(editor::withDefaults(p.tools, p.bundleDir)).empty()) {
+        p.openSetup = true;
+        p.setupFor = 1;
+        return;
+    }
+    if (!p.playerTo.empty()) {
+        buildPlayer(st, doc, p.playerTo);
+        return;
+    }
+    const std::string loc = utf8(doc.projectRoot());
+    ui::showOpenFolderDialog("export-player", onFilePicked, reinterpret_cast<void*>(static_cast<intptr_t>(FileAsk::ExportPlayer)),
+                             loc.c_str(), false);
+}
+
+// Reports a finished Export Standalone Player like Export, the link opening the player's folder.
+static void updatePlayerExport(State& st) {
+    State::Play& p = st.play;
+    if (!p.player.valid() || p.player.wait_for(std::chrono::seconds(0)) != std::future_status::ready) return;
+    State::Play::PlayerExport x = p.player.get();
+    reportBuild(st, "Export Standalone Player", p.playerLaunch, x.disc.exported);
+    if (!x.disc.exported.ok()) {
+        notify(st, editor::buildFailure("Export Standalone Player failed", x.disc.exported), true);
+        return;
+    }
+    scriptLine(nullptr, "player: " + utf8(x.launcher));
+    notify(st, "Standalone player written: " + utf8(x.launcher.filename()) + " in " + utf8(p.playerOut.filename()) +
+                   " (zip the folder to hand it out)",
+           false);
+    st.noticeReveal = x.launcher;
+    st.noticeUntil = ImGui::GetTime() + 20;
+}
+
 // Opens `file` as the document. The scene is parsed first, so a file that does
 // not load leaves the open document as it was.
 static bool openScene(State& st, editor::Document& doc, const std::filesystem::path& file) {
@@ -2243,6 +2342,8 @@ static void filesPending(State& st, editor::Document& doc) {
         openScene(st, doc, path);
     } else if (ask == FileAsk::ExportDisc) {
         buildDisc(st, doc, path);
+    } else if (ask == FileAsk::ExportPlayer) {
+        buildPlayer(st, doc, path);
     } else if (ask == FileAsk::SaveAs) {
         std::optional<std::filesystem::path> rel = editor::sceneInProject(doc.projectRoot(), path);
         if (!rel) {
@@ -2941,6 +3042,7 @@ struct MenuEntry {
     enum Kind { Item, Separator, Heading } kind = Item;
     std::string label, shortcut;
     bool enabled = true, checked = false;
+    std::string tip;  // shown on hover, as why a disabled item is off
     bool choice = false;  // one of a group: the picked one shows a dot, an on/off item a check mark
     std::function<void()> run;
 };
@@ -3074,6 +3176,14 @@ static std::vector<MenuEntry> menuEntries(int which, State& st, editor::Document
             m.push_back(item(st.play.hw.active() ? "Stop Hardware Run" : "Run on Hardware", "Ctrl+F5", !st.play.hwBuild.valid(),
                              [&] { toggleRun(st, doc); }));
             m.push_back(item("Export Disc Image...", "Ctrl+B", !st.play.disc.valid(), [&] { startExport(st, doc); }));
+            {
+                const std::string off = playerExportOff(st);
+                m.push_back(item("Export Standalone Player...", "", off.empty() && !st.play.player.valid(),
+                                 [&] { startPlayerExport(st, doc); }));
+                m.back().tip = off.empty() ? "A folder to zip and hand out: the disc, a copy of pcsx-redux and a launcher. "
+                                             "It runs on this system only (the pcsx-redux Play uses)."
+                                           : off;
+            }
             {
                 std::error_code ec;
                 const bool written = !st.play.discWritten.empty() && std::filesystem::is_regular_file(st.play.discWritten, ec);
@@ -3230,6 +3340,7 @@ static std::function<void()> menuRows(const std::vector<MenuEntry>& entries, flo
                 text(dl, ImVec2(ir.Max.x - space::sm - ss.x, centerY(f.regular, type::label, ir.Min.y, ir.Max.y)), f.regular, type::label,
                      color::textFaint, e.shortcut.c_str());
             }
+            if (!e.tip.empty() && hit.hover > 0.5f) tooltip(e.tip.c_str());
             if (hit.clicked && e.enabled && e.run) run = e.run;
             y += rowH;
         }
@@ -14713,6 +14824,7 @@ ImRect drawMainScreen(State& st, editor::Document& doc, viewport::Ps1View& view,
     }
     updatePlay(st, doc);
     updateExport(st);
+    updatePlayerExport(st);
     updateModels(st, doc);
     ImGui::SetNextWindowPos(ImVec2(0, 0));
     ImGui::SetNextWindowSize(size);
