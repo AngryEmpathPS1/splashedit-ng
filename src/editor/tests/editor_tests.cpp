@@ -4334,6 +4334,279 @@ void testSetPivot() {
     }
 }
 
+// #316: Set pivot keeps the mesh in place in every scene and prefab file of
+// the project too, not only in the open scene: another scene drawing it
+// directly and through prefab instances, a prefab drawing it at its root and
+// one drawing it deeper down, and instances of both in the open scene.
+// Undo puts every file back byte for byte; a file that does not draw the
+// mesh is never written; one that cannot be read stops it, nothing changed.
+namespace pivotfiles {
+namespace fs = std::filesystem;
+
+struct Project {
+    fs::path proj, outside;
+    std::string mesh;  // the cube's node mesh
+};
+
+std::string bytes(const fs::path& f) {
+    std::ifstream in(f, std::ios::binary);
+    return std::string(std::istreambuf_iterator<char>(in), {});
+}
+
+// Every vertex of every object drawing `mesh` in `s` (instances filled in)
+// where it is in the world, and every child of one where it is.
+std::vector<splash::Vec3> worldIn(const Project& p, const splash::Scene& s) {
+    std::vector<splash::Vec3> out;
+    const std::vector<splash::Vec3> verts = splash::loadMesh(p.proj / p.mesh).positions;
+    const std::vector<splash::FlatObject> flat = splash::flatten(s);
+    for (const splash::FlatObject& fo : flat) {
+        if (!fo.object->mesh || fo.object->mesh->mesh != p.mesh) continue;
+        for (const splash::Vec3& v : verts) out.push_back(fo.localToWorld.point(v));
+        for (const splash::Object& c : fo.object->children)
+            for (const splash::FlatObject& g : flat)
+                if (g.object == &c) out.push_back(g.worldPosition);
+    }
+    return out;
+}
+
+// The same for a scene or prefab file as it is on disk.
+std::vector<splash::Vec3> worldInFile(const Project& p, const std::string& rel) {
+    splash::Scene s;
+    if (rel.ends_with(".prefab")) s.objects.push_back(splash::loadPrefab(p.proj / rel).root);
+    else s = splash::loadScene(p.proj / rel);
+    splash::resolvePrefabs(s, p.proj);
+    return worldIn(p, s);
+}
+
+bool same(const std::vector<splash::Vec3>& a, const std::vector<splash::Vec3>& b) {
+    bool ok = !a.empty() && a.size() == b.size();
+    for (size_t i = 0; ok && i < a.size(); ++i) ok = nearV(a[i], b[i], 1e-4f);
+    if (!ok) {
+        std::fprintf(stderr, "  %zu vs %zu points\n", a.size(), b.size());
+        for (size_t i = 0; i < a.size() && i < b.size(); ++i)
+            std::fprintf(stderr, "  %zu: (%g %g %g) vs (%g %g %g)\n", i, a[i].x, a[i].y, a[i].z, b[i].x, b[i].y, b[i].z);
+    }
+    return ok;
+}
+
+splash::Object drawing(const char* name, const std::string& mesh, splash::Vec3 at, splash::Quat rot, splash::Vec3 scale) {
+    splash::Object o = named(name);
+    o.mesh.emplace();
+    o.mesh->mesh = mesh;
+    o.transform.position = at;
+    o.transform.rotation = rot;
+    o.transform.scale = scale;
+    return o;
+}
+
+splash::Object instance(const char* name, const std::string& prefab, splash::Vec3 at, splash::Quat rot) {
+    splash::Object o = named(name);
+    o.prefab = prefab;
+    o.transform.position = at;
+    o.transform.rotation = rot;
+    return o;
+}
+
+// A project with the cube imported, drawn in the open scene (saved as
+// main.scene), in levels/second.scene, in two prefabs, and not at all in
+// other.scene (dated an hour back, so a rewrite shows in its time).
+Project make(const char* name, editor::Document& doc) {
+    std::error_code ec;
+    Project p;
+    const fs::path dir = g_outDir / name;
+    fs::remove_all(dir, ec);
+    p.proj = dir / "game";
+    p.outside = dir / "downloads";
+    fs::create_directories(p.proj / "levels", ec);
+    fs::create_directories(p.proj / "prefabs", ec);
+    fs::create_directories(p.outside, ec);
+    std::ofstream(p.outside / "cube.gltf") << R"({"asset":{"version":"2.0"},"scene":0,"scenes":[{"nodes":[0]}],
+"nodes":[{"name":"Cube","mesh":0,"translation":[5,1,0],"rotation":[0,0.70710678,0,0.70710678],"scale":[2,1,1]}],
+"meshes":[{"primitives":[{"attributes":{"POSITION":0}}]}],
+"accessors":[{"bufferView":0,"componentType":5126,"count":3,"type":"VEC3","min":[0,0,0],"max":[1,1,0]}],
+"bufferViews":[{"buffer":0,"byteLength":36}],
+"buffers":[{"byteLength":36,"uri":"data:application/octet-stream;base64,AAAAAAAAAAAAAAAAAACAPwAAAAAAAAAAAAAAAAAAgD8AAAAA"}]})";
+    doc.reset(splash::Scene{}, p.proj, "main");
+    CHECK(editor::placeModel(doc, p.outside / "cube.gltf", std::nullopt, {0}, {4, 5, 6}).error.empty());
+    CHECK(doc.object({0}) && doc.object({0})->mesh);
+    p.mesh = doc.object({0}) && doc.object({0})->mesh ? doc.object({0})->mesh->mesh : std::string();
+    const splash::Quat turnY{0, 0.38268343f, 0, 0.92387953f}, turnZ{0, 0, 0.38268343f, 0.92387953f};
+
+    // A prefab drawing the cube at its root, holding a tag.
+    splash::Object root = drawing("Crate", p.mesh, {1, 2, 3}, turnZ, {1, 1, 2});
+    splash::Object tag = named("Tag");
+    tag.transform.position = {0, 1, 0};
+    root.children.push_back(tag);
+    splash::savePrefab({root, {}}, p.proj / "prefabs" / "crate.prefab");
+    // A prefab drawing it deeper down: Post > Head (the cube) > Bulb.
+    splash::Object post = named("Post");
+    post.transform.position = {0, 0, 1};
+    splash::Object head = drawing("Head", p.mesh, {0, 3, 0}, turnY, {2, 1, 1});
+    splash::Object bulb = named("Bulb");
+    bulb.transform.position = {0.5f, 0.5f, 0};
+    head.children.push_back(bulb);
+    post.children.push_back(head);
+    splash::savePrefab({post, {}}, p.proj / "prefabs" / "lamppost.prefab");
+
+    // Another scene: the cube with a child, both prefabs placed, and an object without it.
+    splash::Scene second;
+    splash::Object rock = drawing("Rock", p.mesh, {-2, 0, 5}, turnY, {1, 2, 3});
+    splash::Object moss = named("Moss");
+    moss.transform.position = {0.25f, 1, 0};
+    rock.children.push_back(moss);
+    second.objects.push_back(rock);
+    second.objects.push_back(instance("Crate1", "prefabs/crate.prefab", {7, 0, 0}, turnY));
+    second.objects.push_back(instance("Lamp1", "prefabs/lamppost.prefab", {0, 0, -7}, turnZ));
+    second.objects.push_back(named("Empty"));
+    splash::saveScene(second, p.proj / "levels" / "second.scene");
+    // A scene that does not draw the cube.
+    splash::Scene other;
+    other.objects.push_back(named("Alone"));
+    splash::saveScene(other, p.proj / "other.scene");
+    fs::last_write_time(p.proj / "other.scene", fs::file_time_type::clock::now() - std::chrono::hours(1), ec);
+
+    // Instances of both in the open scene, which is saved.
+    std::string err;
+    CHECK(doc.insertPrefab({1}, "prefabs/crate.prefab", {3, 0, 1}, &err));
+    CHECK(doc.insertPrefab({2}, "prefabs/lamppost.prefab", {-3, 0, 1}, &err));
+    CHECK(!doc.save().has_value());
+    return p;
+}
+
+}  // namespace pivotfiles
+
+void testSetPivotOtherFiles() {
+    using namespace pivotfiles;
+    editor::Document doc;
+    const Project p = make("setpivotfiles", doc);
+    const std::vector<std::string> files = {"main.scene", "levels/second.scene", "prefabs/crate.prefab", "prefabs/lamppost.prefab",
+                                            "other.scene"};
+    const std::vector<std::string> drawn = {"levels/second.scene", "prefabs/crate.prefab", "prefabs/lamppost.prefab"};
+    std::map<std::string, std::string> before;
+    std::map<std::string, std::vector<splash::Vec3>> world;
+    for (const std::string& f : files) before[f] = bytes(p.proj / f);
+    for (const std::string& f : drawn) world[f] = worldInFile(p, f);
+    const auto otherTime = std::filesystem::last_write_time(p.proj / "other.scene");
+    // The open scene: the cube, the crate instance (its root draws it) and the lamppost's head.
+    const std::vector<splash::Vec3> open = worldIn(p, doc.scene());
+    CHECK(open.size() == 3 + 4 + 4);
+    CHECK(world["levels/second.scene"].size() == 3 * 4);
+    const splash::Transform crateAt = doc.object({1})->transform;
+
+    const size_t steps = doc.historySize();
+    std::string err;
+    CHECK(editor::pivotBlocker(doc, {0}).empty());
+    CHECK(editor::setPivot(doc, {0}, editor::PivotMode::BottomCentre, {}, &err) && err.empty());
+    if (!err.empty()) std::fprintf(stderr, "  setPivot: %s\n", err.c_str());
+    CHECK(doc.historySize() == steps + 1);
+    const splash::Bounds b = splash::loadMesh(p.proj / p.mesh).bounds();
+    CHECK(near(b.min().y, 0) && near(b.center.x, 0) && near(b.center.z, 0));
+    // Nothing moved, anywhere: the open scene (instances showing their
+    // rewritten prefabs) and every file drawing the cube.
+    CHECK(same(worldIn(p, doc.scene()), open));
+    for (const std::string& f : drawn) CHECK(same(worldInFile(p, f), world[f]));
+    // The crate instance moved where it is placed, its root drawing the cube.
+    CHECK(!nearV(doc.object({1})->transform.position, crateAt.position, 1e-4f));
+    std::map<std::string, std::string> after;
+    for (const std::string& f : files) after[f] = bytes(p.proj / f);
+    for (const std::string& f : drawn) CHECK(after[f] != before[f]);
+    // The open scene's own file waits for its save; a file without the cube is never written.
+    CHECK(after["main.scene"] == before["main.scene"]);
+    CHECK(after["other.scene"] == before["other.scene"] && std::filesystem::last_write_time(p.proj / "other.scene") == otherTime);
+
+    // Undo: every file byte for byte, and still nothing moved.
+    CHECK(doc.undo());
+    for (const std::string& f : files) CHECK(bytes(p.proj / f) == before[f]);
+    CHECK(same(worldIn(p, doc.scene()), open));
+    for (const std::string& f : drawn) CHECK(same(worldInFile(p, f), world[f]));
+    CHECK(nearV(doc.object({1})->transform.position, crateAt.position, 1e-6f));
+    // Redo: as set.
+    CHECK(doc.redo());
+    for (const std::string& f : files) CHECK(bytes(p.proj / f) == after[f]);
+    CHECK(same(worldIn(p, doc.scene()), open));
+    for (const std::string& f : drawn) CHECK(same(worldInFile(p, f), world[f]));
+    CHECK(std::filesystem::last_write_time(p.proj / "other.scene") == otherTime);
+
+    // Saved, and opened again from disk: the open scene is in place too.
+    CHECK(!doc.save().has_value());
+    editor::Document again;
+    CHECK(!again.load(p.proj, "main.scene").has_value());
+    CHECK(same(worldIn(p, again.scene()), open));
+}
+
+void testSetPivotBrokenFile() {
+    using namespace pivotfiles;
+    editor::Document doc;
+    const Project p = make("setpivotbroken", doc);
+    std::ofstream(p.proj / "levels" / "broken.scene") << "{\"format\": \"splashedit-ng/scene\", \"objects\": [";
+    const std::filesystem::path model = p.proj / "models" / "cube.gltf";
+    const std::vector<std::string> files = {"main.scene",          "levels/second.scene", "prefabs/crate.prefab",
+                                            "prefabs/lamppost.prefab", "other.scene",     "levels/broken.scene",
+                                            p.mesh,                splash::importSettingsPath(model).lexically_relative(p.proj).string()};
+    std::map<std::string, std::string> before;
+    for (const std::string& f : files) before[f] = bytes(p.proj / f);
+    const std::vector<splash::Vec3> open = worldIn(p, doc.scene());
+    const splash::Transform t0 = doc.object({0})->transform, t1 = doc.object({1})->transform;
+    const size_t steps = doc.historySize();
+    std::string err;
+    CHECK(!editor::setPivot(doc, {0}, editor::PivotMode::BottomCentre, {}, &err));
+    CHECK(err.find("levels/broken.scene") != std::string::npos);
+    if (err.find("levels/broken.scene") == std::string::npos) std::fprintf(stderr, "  error: %s\n", err.c_str());
+    CHECK(doc.historySize() == steps);
+    for (const std::string& f : files) CHECK(bytes(p.proj / f) == before[f]);
+    CHECK(doc.object({0})->transform.position == t0.position && doc.object({1})->transform.position == t1.position);
+    CHECK(same(worldIn(p, doc.scene()), open));
+    // A prefab file that is not one stops it the same way.
+    std::filesystem::remove(p.proj / "levels" / "broken.scene");
+    std::ofstream(p.proj / "prefabs" / "notone.prefab") << "{\"format\": \"splashedit-ng/scene\"}";
+    err.clear();
+    CHECK(!editor::setPivot(doc, {0}, editor::PivotMode::BottomCentre, {}, &err));
+    CHECK(err.find("prefabs/notone.prefab") != std::string::npos);
+    CHECK(doc.historySize() == steps);
+    for (const std::string& f : files)
+        if (f != "levels/broken.scene") CHECK(bytes(p.proj / f) == before[f]);
+    // Gone, it goes through.
+    std::filesystem::remove(p.proj / "prefabs" / "notone.prefab");
+    CHECK(editor::setPivot(doc, {0}, editor::PivotMode::BottomCentre, {}, &err));
+    CHECK(same(worldIn(p, doc.scene()), open));
+}
+
+void testSetPivotPrefabMode() {
+    using namespace pivotfiles;
+    editor::Document doc;
+    const Project p = make("setpivotprefabmode", doc);
+    // The crate open from the main scene, which draws the cube itself: refused.
+    std::string err;
+    CHECK(!doc.openPrefab("prefabs/crate.prefab").has_value() && doc.inPrefabMode());
+    const std::string crateBytes = bytes(p.proj / "prefabs" / "crate.prefab");
+    const std::string why = editor::pivotBlocker(doc, {0});
+    CHECK(why.find("close the prefab first") != std::string::npos);
+    size_t steps = doc.historySize();
+    CHECK(!editor::setPivot(doc, {0}, editor::PivotMode::BottomCentre, {}, &err) && !err.empty());
+    CHECK(doc.historySize() == steps && bytes(p.proj / "prefabs" / "crate.prefab") == crateBytes);
+    CHECK(doc.closePrefab());
+
+    // Open from other.scene, which does not draw it: the prefab moves in
+    // memory, the other files on disk, and main.scene, not open, on disk too.
+    editor::Document side;
+    CHECK(!side.load(p.proj, "other.scene").has_value());
+    CHECK(!side.openPrefab("prefabs/crate.prefab").has_value());
+    const std::vector<splash::Vec3> crate = worldIn(p, side.scene()), second = worldInFile(p, "levels/second.scene"),
+                                    main = worldInFile(p, "main.scene");
+    const std::string otherBytes = bytes(p.proj / "other.scene"), mainBytes = bytes(p.proj / "main.scene");
+    CHECK(editor::pivotBlocker(side, {0}).empty());
+    err.clear();
+    CHECK(editor::setPivot(side, {0}, editor::PivotMode::Centre, {}, &err));
+    if (!err.empty()) std::fprintf(stderr, "  setPivot: %s\n", err.c_str());
+    CHECK(same(worldIn(p, side.scene()), crate));
+    // The open prefab waits for its save, as an open scene does; until then
+    // the files placing it show its old content where they place it now.
+    CHECK(bytes(p.proj / "prefabs" / "crate.prefab") == crateBytes);
+    CHECK(bytes(p.proj / "main.scene") != mainBytes && bytes(p.proj / "other.scene") == otherBytes);
+    CHECK(!side.save().has_value());
+    CHECK(same(worldInFile(p, "levels/second.scene"), second) && same(worldInFile(p, "main.scene"), main));
+}
+
 // #311: a model of one node that is moved (a cube exported from a level) is
 // placed with the node's pivot: the object draws the node's own mesh and
 // carries the node's transform on top of the drop point, every vertex where
@@ -19135,6 +19408,9 @@ int main(int argc, char** argv) {
     testPlaceModel();
     testPlaceOneNodeModel();
     testSetPivot();
+    testSetPivotOtherFiles();
+    testSetPivotBrokenFile();
+    testSetPivotPrefabMode();
     testPlaceSkinnedModel();
     testDefaultClipLoop();
     testClipLoopImportAndEdit();
