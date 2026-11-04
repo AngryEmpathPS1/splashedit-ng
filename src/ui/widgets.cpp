@@ -944,7 +944,53 @@ int picker(const char* id, ImVec2 pos, float width, const char* placeholder, std
     return picked;
 }
 
-bool assetField(const char* id, ImRect r, const char* ic, ImU32 iconColor, const char* name, const char* meta) {
+AssetAction assetMenu(const char* id, ImRect r, bool hovered, const char* menuName, bool hasFile, bool clearable) {
+    // One menu is open at a time, so where it opened is shared.
+    static ImVec2 menuPos;
+    AssetAction out = AssetAction::None;
+    ImGui::PushID(id);
+    const char* popup = "##assetmenu";
+    if (hovered && ImGui::IsMouseClicked(ImGuiMouseButton_Right)) {
+        // Under the field, from the pointer across, so the field stays in view.
+        menuPos = ImVec2(ImGui::GetIO().MousePos.x, r.Max.y + space::xs);
+        ImGui::OpenPopup(popup);
+    }
+    if (ImGui::IsPopupOpen(popup)) {
+        std::vector<MenuItem> items;
+        items.push_back({"Browse...", "", true, [&out] { out = AssetAction::Browse; }});
+        items.push_back({"Show in Project", "", hasFile, [&out] { out = AssetAction::ShowInProject; }});
+        items.push_back({"Show in file explorer", "", hasFile, [&out] { out = AssetAction::ShowInExplorer; }});
+        items.push_back({"", "", true, {}});
+        items.push_back({"Clear", "", hasFile && clearable, [&out] { out = AssetAction::Clear; }});
+        float w, mh;
+        menuSize(items, &w, &mh);
+        const ImVec2 d = ImGui::GetIO().DisplaySize;
+        ImVec2 pos = menuPos;
+        if (pos.x + w > d.x - space::xs) pos.x -= w;
+        if (pos.y + mh > d.y - space::xs) pos.y = r.Min.y - space::xs - mh;  // no room below: above it
+        pos.x = std::max(pos.x, space::xs);
+        pos.y = std::max(pos.y, space::xs);
+        ImGui::SetNextWindowPos(pos);
+        ImGui::SetNextWindowSize(ImVec2(w, mh));
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
+        ImGui::PushStyleVar(ImGuiStyleVar_PopupBorderSize, 0.0f);
+        const bool shown = ImGui::BeginPopup(popup, ImGuiWindowFlags_NoBackground | ImGuiWindowFlags_NoDecoration |
+                                                        ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoSavedSettings);
+        ImGui::PopStyleVar(2);
+        if (shown) {
+            const std::string name = std::string(menuName ? menuName : id) + ".menu";
+            std::function<void()> run = menuRows(items, w, mh, name.c_str());
+            if (run || ImGui::IsKeyPressed(ImGuiKey_Escape, false)) ImGui::CloseCurrentPopup();
+            ImGui::EndPopup();
+            if (run) run();
+        }
+    }
+    ImGui::PopID();
+    return out;
+}
+
+AssetAction assetField(const char* id, ImRect r, const char* ic, ImU32 iconColor, const char* name, const char* meta,
+                       const char* menuName, bool hasFile, bool clearable) {
     Fonts& f = fonts();
     Hit h = interact(id, r);
     ImDrawList* dl = ImGui::GetWindowDrawList();
@@ -959,7 +1005,8 @@ bool assetField(const char* id, ImRect r, const char* ic, ImU32 iconColor, const
         text(dl, ImVec2(r.Max.x - space::sm - s.x, centerY(f.regular, type::caption, r.Min.y, r.Max.y)), f.regular, type::caption,
              color::textFaint, meta);
     }
-    return h.clicked;
+    const AssetAction menu = menuName ? assetMenu(id, r, h.hovered, menuName, hasFile, clearable) : AssetAction::None;
+    return h.clicked ? AssetAction::Clicked : menu;
 }
 
 // `mixed` (several objects that differ): the knob sits in the middle of a

@@ -66,6 +66,11 @@ class AssetBrowser {
     std::string shownList() const;
 
     const editor::AssetIndex& index() const { return m_index; }
+    // Shows `path` (project-relative) in the file area, next draw: its folder,
+    // no search or type filter, the file selected and scrolled into view. Opens
+    // the panel.
+    void reveal(const std::string& path);
+    const std::string& selected() const { return m_selected; }
     // editor::convertBlocksToLua on `path` (project-relative) with the
     // panel's listing (scanned again first) and open scene; an error goes to
     // the status bar. The listing and references are updated after.
@@ -107,6 +112,8 @@ class AssetBrowser {
     std::map<std::string, bool> m_collapsed;  // folder tree rows closed by the user
     float m_scroll = 0, m_treeScroll = 0;
     std::string m_selected;
+    std::string m_reveal;       // reveal(): the file to show at the next draw
+    bool m_scrollToSelected = false;
     std::vector<std::string> m_shown;
 
     // Drag out: the asset pressed and whether it moved far enough. Folders

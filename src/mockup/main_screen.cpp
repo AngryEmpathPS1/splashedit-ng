@@ -30,6 +30,7 @@
 #include "path.hh"
 #include "shadow.hh"
 #include "import.hh"
+#include "editor/asset_fields.hh"
 #include "editor/catalog.hh"
 #include "editor/document.hh"
 #include "editor/gizmo.hh"
@@ -1837,14 +1838,83 @@ static void slotTarget(State& st, int slot, const editor::ObjectPath& path, ImRe
     }
 }
 
-static bool slotField(State& st, int slot, const editor::ObjectPath& path, const char* id, ImRect r, const char* ic, ImU32 iconColor,
-                      const char* name, const char* meta, int index = -1, const std::vector<editor::ObjectPath>& many = {}) {
-    const bool clicked = assetField(id, r, ic, iconColor, name, meta);
+static void revealInFolder(const std::filesystem::path& file);
+
+// The file field a slot edits (an AssetSlot, or -1 for the Model field);
+// none for Add clips from model, which adds files rather than showing one.
+static std::optional<editor::AssetField> slotAssetField(int slot) {
+    using F = editor::AssetField;
+    if (slot < 0) return F::Model;
+    switch (static_cast<AssetSlot>(slot)) {
+        case AssetSlot::Texture: return F::Texture;
+        case AssetSlot::Lua: return F::Lua;
+        case AssetSlot::TriggerLua: return F::TriggerLua;
+        case AssetSlot::Clip: return F::Clip;
+        case AssetSlot::SkinClips: return F::SkinClips;
+        case AssetSlot::SceneLua: return F::SceneLua;
+        case AssetSlot::MemCardIcon: return F::MemCardIcon;
+        case AssetSlot::UiTexture:
+        case AssetSlot::ClipModels:
+        case AssetSlot::UiFont: break;
+    }
+    return std::nullopt;
+}
+
+// What a file field's right-click menu asked for (#323), but Browse, which
+// the caller handles as a left click: Show in Project selects the file in the
+// Project panel, Show in file explorer opens its folder, Clear sets the field
+// to None as one undo step (not offered for a Model or a skin's Clips: see
+// editor::assetFieldClearable). Scripted runs print
+//   assetfield: <name> <project|explorer|clear> <file>.
+// Returns whether the caller should open its picker.
+static bool assetAction(State& st, editor::Document& doc, ui::AssetAction a, const char* name, int slot,
+                        const editor::ObjectPath& path, int index, const std::vector<editor::ObjectPath>& many = {}) {
+    if (a == ui::AssetAction::Clicked || a == ui::AssetAction::Browse) return true;
+    const std::optional<editor::AssetField> field = slotAssetField(slot);
+    if (a == ui::AssetAction::None || !field) return false;
+    std::string file = editor::assetFieldFile(doc, *field, path, index);
+    // The multi-object inspector: the first of them with a file.
+    for (size_t i = 0; file.empty() && i < many.size(); i++) file = editor::assetFieldFile(doc, *field, many[i], index);
+    if (file.empty()) return false;
+    const std::string who = std::string("assetfield: ") + (name ? name : "?");
+    if (a == ui::AssetAction::ShowInProject) {
+        scriptLine(nullptr, who + " project " + file);
+        st.bottomTab = State::BottomTab::Project;
+        st.assets.reveal(file);
+    } else if (a == ui::AssetAction::ShowInExplorer) {
+        scriptLine(nullptr, who + " explorer " + file);
+        revealInFolder(doc.projectRoot() / fromUtf8(file));
+    } else if (a == ui::AssetAction::Clear) {
+        if (editor::clearAssetField(doc, *field, path, index, many)) scriptLine(nullptr, who + " clear " + file);
+    }
+    return false;
+}
+
+// An asset field that takes a file dropped from the Project panel and, with
+// a `name`, has the right-click menu (named <name>.menu/...). Returns true on
+// a click or Browse: the caller opens its picker. Scripted runs print
+//   assetfield: <name> shows <shown>
+// when what it shows changes.
+static bool slotField(State& st, editor::Document& doc, int slot, const editor::ObjectPath& path, const char* id, const char* name,
+                      ImRect r, const char* ic, ImU32 iconColor, const char* shownName, const char* meta, int index = -1,
+                      const std::vector<editor::ObjectPath>& many = {}) {
+    const std::optional<editor::AssetField> field = name ? slotAssetField(slot) : std::nullopt;
+    bool hasFile = false;
+    if (field) {
+        hasFile = !editor::assetFieldFile(doc, *field, path, index).empty();
+        // The multi-object inspector: any of them with a file.
+        for (const editor::ObjectPath& p : many) hasFile = hasFile || !editor::assetFieldFile(doc, *field, p, index).empty();
+    }
+    if (name) {
+        nameRect(name, r);
+        scriptLine((std::string("assetfield.") + name).c_str(), std::string("assetfield: ") + name + " shows " + shownName);
+    }
+    const ui::AssetAction a = assetField(id, r, ic, iconColor, shownName, meta, name, hasFile, field && editor::assetFieldClearable(*field));
     ImDrawList* dl = ImGui::GetWindowDrawList();
     ImRect shown = r;
     shown.ClipWith(ImRect(dl->GetClipRectMin(), dl->GetClipRectMax()));
     slotTarget(st, slot, path, r, shown, index, many);
-    return clicked;
+    return assetAction(st, doc, a, name, slot, path, index, many);
 }
 
 // The inspector's New blocks and New Lua: writes scripts/<name>.blocks or
@@ -8147,7 +8217,7 @@ static void sceneInspector(State& st, ImDrawList* dl, ImRect r, float y, editor:
         y += 34 + space::xs;
         const std::string& lua = set.script;
         const bool found = !lua.empty() && doc.fileExists(lua);
-        if (slotField(st, static_cast<int>(AssetSlot::SceneLua), {}, "scenelua", row("lscenelua", "File", "The script, blocks or Lua, that runs for the whole scene. Click to pick one."),
+        if (slotField(st, doc, static_cast<int>(AssetSlot::SceneLua), {}, "scenelua", "scene.lua", row("lscenelua", "File", "The script, blocks or Lua, that runs for the whole scene. Click to pick one."),
                        icon::fileCode, lua.empty() || found ? kind::script : color::warn, lua.empty() ? "None" : fileName(lua).c_str(),
                        nullptr))
             pickAsset(AssetSlot::SceneLua, {});
@@ -9845,7 +9915,12 @@ static void sceneInspector(State& st, ImDrawList* dl, ImRect r, float y, editor:
                 }
                 dl->AddRect(tr.Min, tr.Max,
                             !fr.error.empty() ? color::warn : lerpColor(color::border, color::borderStrong, h.hover), radius::field);
-                if (h.clicked) pickAsset(AssetSlot::MemCardIcon, {}, i);
+                // The file fields' right-click menu; its Clear takes the frame out, as the x under it does.
+                const std::string mcName = "scene.mcicon." + std::to_string(i);
+                nameRect(mcName, tr);
+                const AssetAction ma = assetMenu("mcframe", tr, h.hovered, mcName.c_str(), !fr.path.empty());
+                if (h.clicked || assetAction(st, doc, ma, mcName.c_str(), static_cast<int>(AssetSlot::MemCardIcon), {}, i))
+                    pickAsset(AssetSlot::MemCardIcon, {}, i);
                 // Under it: its number and a button that takes it out.
                 const float ly = tr.Max.y + 2;
                 text(dl, ImVec2(tr.Min.x + 2, ly + 2), f.regular, type::caption, color::textFaint, std::to_string(i + 1).c_str());
@@ -10596,7 +10671,7 @@ static void multiInspector(State& st, ImDrawList* dl, ImRect r, float y, editor:
         const ImRect lr = row("llua", "File",
                               "The script, blocks or Lua, that runs for each of these objects. Click to pick one for all of them, or drop one here.");
         nameRect("obj.lua", lr);
-        if (slotField(st, static_cast<int>(AssetSlot::Lua), paths.back(), "lua", lr, icon::fileCode, found ? kind::script : color::warn,
+        if (slotField(st, doc, static_cast<int>(AssetSlot::Lua), paths.back(), "lua", "obj.lua", lr, icon::fileCode, found ? kind::script : color::warn,
                       mixed ? "mixed" : lua.empty() ? "None" : fileName(lua).c_str(), nullptr, -1, paths))
             pickAsset(AssetSlot::Lua, paths.back(), 0, paths);
         sectionEnd(top);
@@ -10677,7 +10752,7 @@ static void multiInspector(State& st, ImDrawList* dl, ImRect r, float y, editor:
                               "An audio file (WAV, AIFF, MP3, Ogg Vorbis or FLAC), converted to SPU ADPCM at export. Click to pick one for "
                               "all of them; each keeps its Name.");
         nameRect("obj.clip", cr);
-        if (slotField(st, static_cast<int>(AssetSlot::Clip), paths.back(), "clip", cr, icon::music, found ? kind::audio : color::warn,
+        if (slotField(st, doc, static_cast<int>(AssetSlot::Clip), paths.back(), "clip", "obj.clip", cr, icon::music, found ? kind::audio : color::warn,
                       mixed ? "mixed" : a.clip.empty() ? "None" : fileName(a.clip).c_str(), nullptr, -1, paths))
             pickAsset(AssetSlot::Clip, paths.back(), 0, paths);
         num("arate", "Sample rate", "The clips are resampled to this at export. Lower takes less sound RAM and sounds duller; 22050 is a good middle.",
@@ -11414,12 +11489,12 @@ static void inspector(State& st, ImDrawList* dl, ImRect r, editor::Document& doc
             // A terrain draws the mesh its grid builds; its materials are the layers.
             const ImRect modelRow = row("lmodel", "Model", "Built from the Terrain grid below: sculpt it in the Scene view.");
             const std::string tt = std::to_string(splash::terrainTriangles(*o->terrain)) + " tris";
-            slotField(st, -1, path, "model", modelRow, icon::layers, kind::terrain, "Terrain grid", tt.c_str());
+            slotField(st, doc, -1, path, "model", nullptr, modelRow, icon::layers, kind::terrain, "Terrain grid", tt.c_str());
             st.modelField = ImRect();
             st.modelFieldPath = path;
         } else {
         const ImRect modelRow = row("lmodel", "Model", "The 3D model to draw. Click to pick a .glb, .gltf, .fbx, .obj or .blend file (.blend needs Blender installed), or drop one here.");
-        bool pickModel = slotField(st, -1, path, "model", modelRow, icon::box, meshSt == editor::AssetStatus::Ok ? kind::mesh : color::warn,
+        bool pickModel = slotField(st, doc, -1, path, "model", "obj.model", modelRow, icon::box, meshSt == editor::AssetStatus::Ok ? kind::mesh : color::warn,
                                     modelName.c_str(), tris.empty() ? nullptr : tris.c_str());
         st.modelField = folded ? ImRect() : modelRow;
         st.modelField.ClipWith(r);
@@ -11527,7 +11602,7 @@ static void inspector(State& st, ImDrawList* dl, ImRect r, editor::Document& doc
         if (nMat <= 1) {
             const ImRect texRow = row("ltex", "Texture", "Image painted on the model. Click to pick an image. Converted to PS1 colours on export.");
             nameRect("obj.texture", texRow);
-            if (slotField(st, static_cast<int>(AssetSlot::Texture), path, "texture", texRow, icon::grid,
+            if (slotField(st, doc, static_cast<int>(AssetSlot::Texture), path, "texture", "obj.texture", texRow, icon::grid,
                           texSt != editor::AssetStatus::Ok || to4 ? color::warn : color::textDim, texName.c_str(), texMeta.c_str(), 0) |
                 fileCard("fixtex", texSt, texPath, ti ? ti->error : std::string()))
                 pickAsset(AssetSlot::Texture, path, 0);
@@ -11556,7 +11631,7 @@ static void inspector(State& st, ImDrawList* dl, ImRect r, editor::Document& doc
                 const ImRect texRow = row(("ltex." + is).c_str(), label.c_str(),
                                           "Image painted on this part of the model. Click to pick an image, or drop one here. Converted to PS1 colours on export.");
                 nameRect("obj.texture." + is, texRow);
-                if (slotField(st, static_cast<int>(AssetSlot::Texture), path, ("texture." + is).c_str(), texRow, icon::grid,
+                if (slotField(st, doc, static_cast<int>(AssetSlot::Texture), path, ("texture." + is).c_str(), ("obj.texture." + is).c_str(), texRow, icon::grid,
                               mSt != editor::AssetStatus::Ok || to4 ? color::warn : color::textDim,
                               tp.empty() ? "None" : fileName(tp).c_str(), meta.empty() ? nullptr : meta.c_str(), int(i)) |
                     fileCard(("fixtex." + is).c_str(), mSt, tp, mt ? mt->error : std::string()))
@@ -11936,7 +12011,7 @@ static void inspector(State& st, ImDrawList* dl, ImRect r, editor::Document& doc
                      removeFlag(editor::ComponentKind::Script)));
         y += 34 + space::xs;
         bool found = doc.fileExists(lua);
-        if (slotField(st, static_cast<int>(AssetSlot::Lua), path, "lua", row("llua", "File", "The script, blocks or Lua, that runs for this object. Click to pick one."), icon::fileCode,
+        if (slotField(st, doc, static_cast<int>(AssetSlot::Lua), path, "lua", "obj.lua", row("llua", "File", "The script, blocks or Lua, that runs for this object. Click to pick one."), icon::fileCode,
                        found ? kind::script : color::warn, lua.empty() ? "None" : fileName(lua).c_str(), nullptr) |
             // No file yet: the field and New blocks / New Lua below say so, a "not found" card would not.
             fileCard("fixlua", found || lua.empty() ? editor::AssetStatus::Ok : editor::AssetStatus::Missing, lua, std::string()))
@@ -12237,7 +12312,7 @@ static void inspector(State& st, ImDrawList* dl, ImRect r, editor::Document& doc
                          fmtFixed(tr.size.y).c_str(), fmtFixed(tr.size.z).c_str(), nullptr, sz),
                "tsize", [&](splash::Object& ob) { ob.trigger->size = {std::max(0.0f, sz[0]), std::max(0.0f, sz[1]), std::max(0.0f, sz[2])}; });
         bool found = !tr.lua.empty() && doc.fileExists(tr.lua);
-        if (slotField(st, static_cast<int>(AssetSlot::TriggerLua), path, "tlua", row("ltlua", "Script", "The script, blocks or Lua, that gets the enter and exit calls. Click to pick one."), icon::fileCode,
+        if (slotField(st, doc, static_cast<int>(AssetSlot::TriggerLua), path, "tlua", "obj.tlua", row("ltlua", "Script", "The script, blocks or Lua, that gets the enter and exit calls. Click to pick one."), icon::fileCode,
                        tr.lua.empty() || found ? kind::script : color::warn, tr.lua.empty() ? "None" : fileName(tr.lua).c_str(), nullptr))
             pickAsset(AssetSlot::TriggerLua, path);
         if (!tr.lua.empty()) {
@@ -12426,7 +12501,7 @@ static void inspector(State& st, ImDrawList* dl, ImRect r, editor::Document& doc
                 if (on) dl->AddCircleFilled(dot.GetCenter(), 3.5f, kind::terrain);
                 nameRect("obj.tlayer." + is, slot);
                 const std::string meta = std::to_string(painted[i]) + " cells";
-                if (slotField(st, static_cast<int>(AssetSlot::Texture), path, ("tlayer." + is).c_str(), slot, icon::grid, color::textDim,
+                if (slotField(st, doc, static_cast<int>(AssetSlot::Texture), path, ("tlayer." + is).c_str(), ("obj.tlayer." + is).c_str(), slot, icon::grid, color::textDim,
                               tp.empty() ? "None" : fileName(tp).c_str(), meta.c_str(), int(i)))
                     pickAsset(AssetSlot::Texture, path, int(i));
                 (void)mt;
@@ -12739,7 +12814,7 @@ static void inspector(State& st, ImDrawList* dl, ImRect r, editor::Document& doc
         top = y;
         compSection("s_audio", editor::ComponentKind::Audio);
         bool found = doc.fileExists(a.clip);
-        if (slotField(st, static_cast<int>(AssetSlot::Clip), path, "clip", row("lclip", "Clip", "An audio file (WAV, AIFF, MP3, Ogg Vorbis or FLAC), converted to SPU ADPCM at export. Click to pick one."), icon::music,
+        if (slotField(st, doc, static_cast<int>(AssetSlot::Clip), path, "clip", "obj.clip", row("lclip", "Clip", "An audio file (WAV, AIFF, MP3, Ogg Vorbis or FLAC), converted to SPU ADPCM at export. Click to pick one."), icon::music,
                        found ? kind::audio : color::warn, a.clip.empty() ? "None" : fileName(a.clip).c_str(), nullptr) |
             fileCard("fixclip", found ? editor::AssetStatus::Ok : editor::AssetStatus::Missing, a.clip, std::string()))
             pickAsset(AssetSlot::Clip, path);
@@ -12785,7 +12860,7 @@ static void inspector(State& st, ImDrawList* dl, ImRect r, editor::Document& doc
         top = y;
         compSection("s_skin", editor::ComponentKind::Skin);
         std::string clips = std::to_string(sk.clips.size()) + (sk.clips.size() == 1 ? " clip" : " clips");
-        if (slotField(st, static_cast<int>(AssetSlot::SkinClips), path, "clips", row("lclips", "Clips", "Animation clips, at most 16. Click to pick the .anim files; the pick replaces the list."),
+        if (slotField(st, doc, static_cast<int>(AssetSlot::SkinClips), path, "clips", "obj.skinclips", row("lclips", "Clips", "Animation clips, at most 16. Click to pick the .anim files; the pick replaces the list."),
                        icon::play, kind::camera, clips.c_str(), nullptr))
             pickAsset(AssetSlot::SkinClips, path);
         // Animations from other model files (Mixamo: one per file), named
@@ -12798,7 +12873,7 @@ static void inspector(State& st, ImDrawList* dl, ImRect r, editor::Document& doc
                                   "file): matched by joint name and converted with this model's import settings. Click to pick "
                                   "the files, or drop them here. Changing either file imports them again.");
             nameRect("obj.skinaddclips", ar);
-            if (slotField(st, static_cast<int>(AssetSlot::ClipModels), path, "clipmodels", ar, icon::box, kind::mesh, "Add clips from model...",
+            if (slotField(st, doc, static_cast<int>(AssetSlot::ClipModels), path, "clipmodels", "obj.skinaddclips", ar, icon::box, kind::mesh, "Add clips from model...",
                           meta.empty() ? nullptr : meta.c_str()))
                 pickAsset(AssetSlot::ClipModels, path);
         }
