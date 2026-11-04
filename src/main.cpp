@@ -1071,6 +1071,7 @@ int main(int argc, char** argv) {
             for (const std::string& w : state.importPanel.shown) std::printf("  import warning: %s\n", w.c_str());
             std::printf("project panel open: %s\n", state.assets.open ? "yes" : "no");
             std::printf("project panel: %s\n", state.assets.shownList().c_str());
+            std::printf("project panel selected: %s\n", state.assets.selected().empty() ? "(none)" : state.assets.selected().c_str());
             for (const auto& [name, r] : ui::namedRects())
                 std::printf("control %s at %d,%d %d,%d\n", name.c_str(), int(r.Min.x), int(r.Min.y), int(r.Max.x), int(r.Max.y));
             running = false;

@@ -174,8 +174,19 @@ struct PickerItem {
 };
 int picker(const char* id, ImVec2 pos, float width, const char* placeholder, std::string* query, const std::vector<PickerItem>& items);
 
-// Returns true when clicked.
-bool assetField(const char* id, ImRect r, const char* icon, ImU32 iconColor, const char* name, const char* meta);
+// What an asset field asked for this frame: a left click (the caller opens
+// its picker) or a row of its right-click menu.
+enum class AssetAction { None, Clicked, Browse, ShowInProject, ShowInExplorer, Clear };
+// The right-click menu of a file field whose rect `r` was hovered: Browse...,
+// Show in Project, Show in file explorer and Clear (#323). The Show rows and
+// Clear are disabled without a file (`hasFile`); Clear also when not
+// `clearable`. Scripted checks find its rows as <menuName>.menu/<label>.
+// Call it every frame after the field's interact().
+AssetAction assetMenu(const char* id, ImRect r, bool hovered, const char* menuName, bool hasFile, bool clearable = true);
+// A file field showing `name` (and `meta` at its right). With a `menuName` a
+// right click opens assetMenu.
+AssetAction assetField(const char* id, ImRect r, const char* icon, ImU32 iconColor, const char* name, const char* meta,
+                       const char* menuName = nullptr, bool hasFile = false, bool clearable = true);
 // Returns true on the frame the switch is clicked. `mixed` draws the third
 // look (knob in the middle, a dash on it) for values that differ.
 bool toggle(const char* id, ImRect r, bool on, bool mixed = false);

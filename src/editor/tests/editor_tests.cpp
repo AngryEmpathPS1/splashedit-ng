@@ -34,6 +34,7 @@
 
 #include "editor/asset_browser.hh"
 #include "editor/blocks_edit.hh"
+#include "editor/asset_fields.hh"
 #include "editor/catalog.hh"
 #include "editor/document.hh"
 #include "editor/hardware.hh"
@@ -621,6 +622,106 @@ void testComponentFieldsSaveUndo() {
     // The reloaded scene keeps undoing nothing; the edited one undoes all the way back.
     for (size_t i = 0; i < steps.size(); i++) CHECK(d.undo());
     for (const Step& st : steps) CHECK(st.isOld(*d.object(editor::ObjectPath{st.at})));
+}
+
+// The inspector's file fields' Clear (#323): each sets its field back to
+// None as one undo step, which undo takes back and redo does again; a field
+// that is None already takes no step, nor do a Model and a skin's Clips.
+void testClearAssetField() {
+    using F = editor::AssetField;
+    splash::Scene sc;
+    splash::Object a = named("A");
+    a.mesh.emplace();
+    a.mesh->mesh = "meshes/crate.mesh";
+    a.mesh->materials.resize(2);
+    a.mesh->materials[0].texture = "textures/crate.png";
+    a.mesh->materials[1].texture = "textures/lid.png";
+    a.script.emplace().lua = "scripts/a.lua";
+    a.trigger.emplace().lua = "scripts/a_trigger.lua";
+    a.audio.emplace().clip = "audio/hit.wav";
+    a.audio->clipName = "hit";
+    a.skin.emplace().clips = {"anims/walk.anim", "anims/run.anim"};
+    sc.objects.push_back(a);
+    splash::Object b = named("B");
+    b.script.emplace().lua = "scripts/b.lua";
+    sc.objects.push_back(b);
+    sc.objects.push_back(named("C"));
+    sc.settings.script = "scripts/scene.lua";
+    sc.settings.memCard.icons = {"textures/i0.png", "textures/i1.png", "textures/i2.png"};
+
+    editor::Document d;
+    d.reset(sc);
+    // The file each field shows.
+    CHECK(editor::assetFieldFile(d, F::Model, {0}) == "meshes/crate.mesh");
+    CHECK(editor::assetFieldFile(d, F::Texture, {0}, -1) == "textures/crate.png");
+    CHECK(editor::assetFieldFile(d, F::Texture, {0}, 1) == "textures/lid.png");
+    CHECK(editor::assetFieldFile(d, F::Texture, {0}, 2).empty());
+    CHECK(editor::assetFieldFile(d, F::SkinClips, {0}) == "anims/walk.anim");
+    CHECK(editor::assetFieldFile(d, F::MemCardIcon, {}, 1) == "textures/i1.png");
+    CHECK(editor::assetFieldFile(d, F::Lua, {2}).empty());
+
+    // Clear `f`, then undo and redo: `get` reads the field.
+    auto cycle = [&](F f, const editor::ObjectPath& p, int index, const std::function<std::string()>& get, const std::string& was) {
+        const size_t steps = d.historySize();
+        CHECK(get() == was);
+        CHECK(editor::clearAssetField(d, f, p, index));
+        CHECK(get().empty());
+        CHECK(d.historySize() == steps + 1);
+        CHECK(d.dirty());
+        CHECK(d.undo());
+        CHECK(get() == was);
+        CHECK(d.redo());
+        CHECK(get().empty());
+        // Already None: no step.
+        CHECK(!editor::clearAssetField(d, f, p, index));
+        CHECK(d.historySize() == steps + 1);
+    };
+    auto obj = [&]() -> const splash::Object& { return *d.object({0}); };
+    // A mesh without a model and a skin without clips stop the export: no Clear.
+    CHECK(!editor::assetFieldClearable(F::Model) && !editor::assetFieldClearable(F::SkinClips));
+    CHECK(editor::assetFieldClearable(F::Texture) && editor::assetFieldClearable(F::MemCardIcon));
+    CHECK(!editor::clearAssetField(d, F::Model, {0}));
+    CHECK(!editor::clearAssetField(d, F::SkinClips, {0}));
+    CHECK(obj().mesh->mesh == "meshes/crate.mesh" && obj().skin->clips.size() == 2);
+    CHECK(d.historySize() == 0 && !d.dirty());
+    cycle(F::Texture, {0}, 1, [&] { return obj().mesh->materials[1].texture; }, "textures/lid.png");
+    CHECK(obj().mesh->materials[0].texture == "textures/crate.png");  // only that material's
+    CHECK(obj().mesh->materials.size() == 2);
+    cycle(F::Texture, {0}, -1, [&] { return obj().mesh->materials[0].texture; }, "textures/crate.png");
+    cycle(F::Lua, {0}, -1, [&] { return obj().script->lua; }, "scripts/a.lua");
+    CHECK(obj().script.has_value());  // the component stays
+    cycle(F::TriggerLua, {0}, -1, [&] { return obj().trigger->lua; }, "scripts/a_trigger.lua");
+    cycle(F::Clip, {0}, -1, [&] { return obj().audio->clip; }, "audio/hit.wav");
+    CHECK(obj().audio->clipName == "hit");
+    cycle(F::SceneLua, {}, -1, [&] { return d.scene().settings.script; }, "scripts/scene.lua");
+    // An icon frame without an image cannot export: Clear takes the frame out.
+    {
+        const size_t steps = d.historySize();
+        CHECK(editor::clearAssetField(d, F::MemCardIcon, {}, 1));
+        CHECK((d.scene().settings.memCard.icons == std::vector<std::string>{"textures/i0.png", "textures/i2.png"}));
+        CHECK(d.historySize() == steps + 1);
+        CHECK(d.undo());
+        CHECK(d.scene().settings.memCard.icons.size() == 3 && d.scene().settings.memCard.icons[1] == "textures/i1.png");
+        CHECK(d.redo());
+        CHECK(d.scene().settings.memCard.icons.size() == 2);
+        CHECK(!editor::clearAssetField(d, F::MemCardIcon, {}, 5));
+    }
+    // The multi-object inspector: every selected object's script, one step;
+    // the one without a file is left as it is.
+    {
+        const size_t steps = d.historySize();
+        d.edit({0}, [](splash::Object& o) { o.script->lua = "scripts/a.lua"; });
+        d.endMerge();
+        CHECK(editor::clearAssetField(d, F::Lua, {1}, -1, {{0}, {1}, {2}}));
+        CHECK(d.object({0})->script->lua.empty() && d.object({1})->script->lua.empty());
+        CHECK(!d.object({2})->script);
+        CHECK(d.historySize() == steps + 2);
+        CHECK(d.undo());
+        CHECK(d.object({0})->script->lua == "scripts/a.lua" && d.object({1})->script->lua == "scripts/b.lua");
+    }
+    // No such object or component: nothing.
+    CHECK(!editor::clearAssetField(d, F::Clip, {2}));
+    CHECK(!editor::clearAssetField(d, F::Model, {9}));
 }
 
 void testStructure() {
@@ -19548,6 +19649,7 @@ int main(int argc, char** argv) {
     testMemCard();
     testDirtyAndSave();
     testComponentFieldsSaveUndo();
+    testClearAssetField();
     testStructure();
     testMove();
     testPick();
