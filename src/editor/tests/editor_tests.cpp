@@ -77,6 +77,7 @@
 #include "ui/window_chrome.hh"
 #include "ui/ui_scale.hh"
 #include "ui/list_scroll.hh"
+#include "ui/popup_place.hh"
 #include "ui/scrub.hh"
 #include "ui/colour_hex.hh"
 #include "budget.hh"
@@ -15574,6 +15575,48 @@ void testListScroll() {
     CHECK(ui::edgeScrollSpeed(120, 100, 130, 26, 900) == 0);  // a view too short to have edges
 }
 
+// A colour picker opened from a well stays on screen (#324): under the field
+// when it fits, above it near the screen's bottom, pulled in from the right
+// edge, its top on screen when it is taller than the screen, and a picker
+// lined up with the field's right edge (pivot 1) keeps that alignment.
+void testPopupPlace() {
+    const ui::PopupBox screen{0, 0, 1600, 960};
+    const float W = 236, H = 290, gap = 4, m = 4;
+    // Mid-screen, left-aligned: under the field, its left on the field's left.
+    ui::PopupPos p = ui::popupBelow({600, 400, 900, 424}, W, H, screen, 0, gap, m);
+    CHECK(p.x == 600 && p.y == 428);
+    // Mid-screen, right-aligned (pivot 1): its right edge on the field's right.
+    p = ui::popupBelow({600, 400, 900, 424}, W, H, screen, 1, gap, m);
+    CHECK(p.x + W == 900 && p.y == 428);
+    // Near the bottom: above the field, its bottom `gap` over the field's top; alignment kept.
+    p = ui::popupBelow({1300, 880, 1580, 904}, W, H, screen, 1, gap, m);
+    CHECK(p.y + H == 876 && p.x + W == 1580);
+    p = ui::popupBelow({20, 880, 300, 904}, W, H, screen, 0, gap, m);
+    CHECK(p.y + H == 876 && p.x == 20);
+    // Exactly fits below (its bottom on the margin): stays below.
+    p = ui::popupBelow({600, 400, 900, 960 - m - H - gap}, W, H, screen, 0, gap, m);
+    CHECK(p.y == 960 - m - H);
+    // Near the right edge, left-aligned: pulled in to the margin.
+    p = ui::popupBelow({1500, 400, 1590, 424}, W, H, screen, 0, gap, m);
+    CHECK(p.x + W == 1600 - m && p.y == 428);
+    // Right-aligned to a field hanging off the left: pushed in to the left margin.
+    p = ui::popupBelow({-50, 400, 100, 424}, W, H, screen, 1, gap, m);
+    CHECK(p.x == m);
+    // No room above or below (a short screen): clamped inside it.
+    p = ui::popupBelow({600, 150, 900, 174}, W, H, {0, 0, 1600, 320}, 0, gap, m);
+    CHECK(p.y >= m && p.y + H <= 320 - m);
+    // Taller than the screen: its top pinned to the top margin, wherever the field is.
+    for (float fy : {10.0f, 150.0f, 280.0f}) {
+        p = ui::popupBelow({600, fy, 900, fy + 24}, W, 500, {0, 0, 1600, 320}, 1, gap, m);
+        CHECK(p.y == m && p.x + W == 900);
+    }
+    // A screen not at the origin (a work area under a menu bar).
+    p = ui::popupBelow({600, 30, 900, 54}, W, H, {0, 40, 1600, 960}, 0, gap, m);
+    CHECK(p.y == 58);
+    p = ui::popupBelow({600, 900, 900, 924}, W, H, {0, 40, 1600, 960}, 0, gap, m);
+    CHECK(p.y + H == 896);
+}
+
 // Dragging a whole-number field moves it one per pixel at any size (#174):
 // a 300 px wide element grows by 5 for 5 px, not by 15; Shift takes 10 px
 // per step. Other fields keep growing with the value.
@@ -19879,6 +19922,7 @@ int main(int argc, char** argv) {
     testGpuRaster();
     testShadows();
     testListScroll();
+    testPopupPlace();
     testTerrain();
     testPathSampler();
     testPathScene();
