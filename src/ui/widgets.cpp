@@ -17,6 +17,7 @@
 #include "editor/tv_preview.hh"
 #include "ui/colour_hex.hh"
 #include "ui/icons.h"
+#include "ui/popup_place.hh"
 #include "ui/scrub.hh"
 
 using namespace theme;
@@ -1031,6 +1032,21 @@ bool toggle(const char* id, ImRect r, bool on, bool mixed) {
     Hit h = interact(id, r);
     drawToggle(ImGui::GetWindowDrawList(), id, r, on, h.hover, mixed);
     return h.clicked;
+}
+
+void placePopupBelow(const char* popupId, ImRect field, ImVec2 pivot) {
+    // BeginPopup's window is "##Popup_<id>"; its size is known from the frame before. The first time it
+    // opens ImGui sizes it on a hidden frame (and ignores the position there), so the guess (about a
+    // 220 px colour picker) only stands in until then.
+    char name[32];
+    ImFormatString(name, IM_COUNTOF(name), "##Popup_%08x", ImGui::GetID(popupId));
+    const ImGuiWindow* w = ImGui::FindWindowByName(name);
+    const ImVec2 sz = w && w->Size.x > 0 && w->Size.y > 0 ? w->Size : ImVec2(240, 300);
+    const ImGuiViewport* vp = ImGui::GetMainViewport();
+    const PopupPos p = popupBelow({field.Min.x, field.Min.y, field.Max.x, field.Max.y}, sz.x, sz.y,
+                                  {vp->WorkPos.x, vp->WorkPos.y, vp->WorkPos.x + vp->WorkSize.x, vp->WorkPos.y + vp->WorkSize.y},
+                                  pivot.x, space::xs, space::xs);
+    ImGui::SetNextWindowPos(ImVec2(p.x, p.y), ImGuiCond_Always);
 }
 
 ColorFieldHit colorField(const char* id, ImRect r, const std::array<float, 3>& value, const char* name, bool mixed) {
