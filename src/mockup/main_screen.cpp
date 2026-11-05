@@ -6195,7 +6195,7 @@ static void paintTool(State& st, ImDrawList* dl, viewport::Ps1View& view, ImRect
     };
     if (colHit.pasted) brush.color = toBytes(*colHit.pasted);
     if (colHit.clicked) ImGui::OpenPopup("##paintcolpick");
-    ImGui::SetNextWindowPos(ImVec2(colRow.Min.x, colRow.Max.y + space::xs), ImGuiCond_Always);
+    placePopupBelow("##paintcolpick", colRow);
     pushPopupStyle();
     if (ImGui::BeginPopup("##paintcolpick")) {
         float c[3] = {cf[0], cf[1], cf[2]};
@@ -7983,7 +7983,7 @@ static void tilemapSection(State& st, ImDrawList* dl, editor::Document& doc, flo
             const ColorFieldHit colHit = colorField("tilebrushcolor", colRow, b.color, "scene.tilebrushcolor");
             if (colHit.clicked) ImGui::OpenPopup("##tilebrushcolpick");
             if (colHit.pasted) editBrush([&](splash::TileBrush& e) { e.color = *colHit.pasted; });
-            ImGui::SetNextWindowPos(ImVec2(colRow.Max.x, colRow.Max.y + space::xs), ImGuiCond_Always, ImVec2(1, 0));
+            placePopupBelow("##tilebrushcolpick", colRow, ImVec2(1, 0));
             pushPopupStyle();
             if (ImGui::BeginPopup("##tilebrushcolpick")) {
                 float c[3] = {b.color[0], b.color[1], b.color[2]};
@@ -8280,7 +8280,7 @@ static void sceneInspector(State& st, ImDrawList* dl, ImRect r, float y, editor:
         if (fogHit.clicked) ImGui::OpenPopup("##fogcolpick");
         // Paste from the field's right-click menu: one undo step.
         if (fogHit.pasted) doc.editSettings([&](splash::SceneSettings& s) { s.fog.color = *fogHit.pasted; });
-        ImGui::SetNextWindowPos(ImVec2(colRow.Max.x, colRow.Max.y + space::xs), ImGuiCond_Always, ImVec2(1, 0));
+        placePopupBelow("##fogcolpick", colRow, ImVec2(1, 0));
         pushPopupStyle();
         if (ImGui::BeginPopup("##fogcolpick")) {
             float c[3] = {set.fog.color[0], set.fog.color[1], set.fog.color[2]};
@@ -8289,6 +8289,7 @@ static void sceneInspector(State& st, ImDrawList* dl, ImRect r, float y, editor:
                                                             ImGuiColorEditFlags_NoAlpha))
                 doc.editSettings([&](splash::SceneSettings& s) { s.fog.color = {c[0], c[1], c[2]}; }, "fogcol");
             if (ImGui::IsItemDeactivated()) doc.endMerge();
+            nameRect("scene.fogcolpick", ImGui::GetCurrentWindow()->Rect());
             ImGui::EndPopup();
         }
         ImGui::PopStyleVar(4);
@@ -10520,7 +10521,7 @@ static void multiInspector(State& st, ImDrawList* dl, ImRect r, float y, editor:
             const ColorFieldHit fcHit = colorField("flatcol", fcRow, fc, "obj.flatcolor", mixed);
             if (fcHit.clicked) ImGui::OpenPopup("##mflatcolpick");
             if (fcHit.pasted) editAll(setFlat({(*fcHit.pasted)[0], (*fcHit.pasted)[1], (*fcHit.pasted)[2]}));
-            ImGui::SetNextWindowPos(ImVec2(fcRow.Max.x, fcRow.Max.y + space::xs), ImGuiCond_Always, ImVec2(1, 0));
+            placePopupBelow("##mflatcolpick", fcRow, ImVec2(1, 0));
             pushPopupStyle();
             if (ImGui::BeginPopup("##mflatcolpick")) {
                 float c[3] = {fc[0], fc[1], fc[2]};
@@ -10632,7 +10633,7 @@ static void multiInspector(State& st, ImDrawList* dl, ImRect r, float y, editor:
         const ColorFieldHit lHit = colorField("lcol", colRow, l.color, "obj.lcol", colMixed);
         if (lHit.clicked) ImGui::OpenPopup("##lcolpick");
         if (lHit.pasted) editAll([&](splash::Object& ob) { ob.light->color = *lHit.pasted; });
-        ImGui::SetNextWindowPos(ImVec2(colRow.Max.x, colRow.Max.y + space::xs), ImGuiCond_Always, ImVec2(1, 0));
+        placePopupBelow("##lcolpick", colRow, ImVec2(1, 0));
         pushPopupStyle();
         if (ImGui::BeginPopup("##lcolpick")) {
             float c[3] = {l.color[0], l.color[1], l.color[2]};
@@ -10641,6 +10642,7 @@ static void multiInspector(State& st, ImDrawList* dl, ImRect r, float y, editor:
                                                           ImGuiColorEditFlags_NoAlpha))
                 editAll([&](splash::Object& ob) { ob.light->color = {c[0], c[1], c[2]}; }, "mlcol");
             if (ImGui::IsItemDeactivated()) doc.endMerge();
+            nameRect("obj.lcolpick", ImGui::GetCurrentWindow()->Rect());
             ImGui::EndPopup();
         }
         ImGui::PopStyleVar(4);
@@ -11530,8 +11532,8 @@ static void inspector(State& st, ImDrawList* dl, ImRect r, editor::Document& doc
                     std::array<float, 4>& col = ob.mesh->materials[i].color;
                     col = {(*matHit.pasted)[0], (*matHit.pasted)[1], (*matHit.pasted)[2], col[3]};
                 });
-            // Right-aligned under the field, so it stays inside the inspector.
-            ImGui::SetNextWindowPos(ImVec2(colRow.Max.x, colRow.Max.y + space::xs), ImGuiCond_Always, ImVec2(1, 0));
+            // Right-aligned under the field (above it near the screen's bottom), so it stays on screen.
+            placePopupBelow(popup.c_str(), colRow, ImVec2(1, 0));
             pushPopupStyle();
             if (ImGui::BeginPopup(popup.c_str())) {
                 float c[3] = {c3[0], c3[1], c3[2]};
@@ -11803,7 +11805,7 @@ static void inspector(State& st, ImDrawList* dl, ImRect r, editor::Document& doc
             const ColorFieldHit fcHit = colorField("flatcol", fcRow, fc, "obj.flatcolor");
             if (fcHit.clicked) ImGui::OpenPopup("##flatcolpick");
             if (fcHit.pasted) doc.edit(path, setFlat({(*fcHit.pasted)[0], (*fcHit.pasted)[1], (*fcHit.pasted)[2]}));
-            ImGui::SetNextWindowPos(ImVec2(fcRow.Max.x, fcRow.Max.y + space::xs), ImGuiCond_Always, ImVec2(1, 0));
+            placePopupBelow("##flatcolpick", fcRow, ImVec2(1, 0));
             pushPopupStyle();
             if (ImGui::BeginPopup("##flatcolpick")) {
                 float c[3] = {fc[0], fc[1], fc[2]};
@@ -11964,8 +11966,8 @@ static void inspector(State& st, ImDrawList* dl, ImRect r, editor::Document& doc
         if (lHit.clicked) ImGui::OpenPopup("##lcolpick");
         // Paste from the field's right-click menu: one undo step.
         if (lHit.pasted) doc.edit(path, [&](splash::Object& ob) { ob.light->color = *lHit.pasted; });
-        // Right-aligned under the field, so it stays inside the inspector.
-        ImGui::SetNextWindowPos(ImVec2(colRow.Max.x, colRow.Max.y + space::xs), ImGuiCond_Always, ImVec2(1, 0));
+        // Right-aligned under the field (above it near the screen's bottom), so it stays on screen.
+        placePopupBelow("##lcolpick", colRow, ImVec2(1, 0));
         pushPopupStyle();
         if (ImGui::BeginPopup("##lcolpick")) {
             float c[3] = {l.color[0], l.color[1], l.color[2]};
@@ -11974,6 +11976,7 @@ static void inspector(State& st, ImDrawList* dl, ImRect r, editor::Document& doc
                                                           ImGuiColorEditFlags_NoAlpha))
                 doc.edit(path, [&](splash::Object& ob) { ob.light->color = {c[0], c[1], c[2]}; }, "lcol");
             if (ImGui::IsItemDeactivated()) doc.endMerge();
+            nameRect("obj.lcolpick", ImGui::GetCurrentWindow()->Rect());
             ImGui::EndPopup();
         }
         ImGui::PopStyleVar(4);

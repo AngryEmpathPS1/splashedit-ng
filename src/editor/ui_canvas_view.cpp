@@ -1303,7 +1303,7 @@ bool colourRow(editor::Document& doc, Rows& rows, const char* id, const char* la
     if (hit.clicked) ImGui::OpenPopup(popup.c_str());
     // Paste from the field's right-click menu: one undo step.
     if (hit.pasted) uic::editElement(doc, c, e, [&](UIElement& el) { set(el, *hit.pasted); });
-    ImGui::SetNextWindowPos(ImVec2(field.Max.x, field.Max.y + space::xs), ImGuiCond_Always, ImVec2(1, 0));
+    placePopupBelow(popup.c_str(), field, ImVec2(1, 0));
     pushMenuStyle();
     bool open = false;
     if (ImGui::BeginPopup(popup.c_str())) {

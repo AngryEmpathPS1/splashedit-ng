@@ -201,6 +201,13 @@ struct ColorFieldHit {
 // <name>.menu/Paste (`name` defaults to `id`).
 // `mixed`: it stands for several colours (#263); it reads "mixed" over a grey swatch.
 ColorFieldHit colorField(const char* id, ImRect r, const std::array<float, 3>& value, const char* name = nullptr, bool mixed = false);
+// Places the popup `popupId` (as given to BeginPopup, in the current ID scope)
+// for the next BeginPopup: under `field`, or above it when there is no room
+// below, clamped inside the main viewport (#324). `pivot.x` 0 lines its left
+// edge up with the field's, 1 its right edge. Call it where SetNextWindowPos
+// would go; it uses the popup's size from the frame before (popupBelow() in
+// ui/popup_place.hh is the arithmetic).
+void placePopupBelow(const char* popupId, ImRect field, ImVec2 pivot = ImVec2(0, 0));
 void slider(const char* id, ImRect r, float t, const char* value);
 
 // Problem card with an inline fix action (none when fixLabel is null).
