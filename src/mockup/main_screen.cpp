@@ -8018,8 +8018,8 @@ static void tilemapSection(State& st, ImDrawList* dl, editor::Document& doc, flo
                 editBrush([v](splash::TileBrush& e) { e.cell = v; }, "tilebrushcell");
             }
             if (fc.done) doc.endMerge();
-            // Under the row, right edges lined up: it opens leftwards, inside the window.
-            ImGui::SetNextWindowPos(ImVec2(cellRow.Max.x, thumb.Max.y + 4), ImGuiCond_Always, ImVec2(1, 0));
+            // Under the row, right edges lined up (it opens leftwards); above it when there is no room below.
+            placePopupBelow("##tilecellpick", cellRow, ImVec2(1, 0));
             if (ImGui::BeginPopup("##tilecellpick")) {
                 ImDrawList* pdl = ImGui::GetWindowDrawList();
                 if (!img.ready()) {
@@ -8054,6 +8054,7 @@ static void tilemapSection(State& st, ImDrawList* dl, editor::Document& doc, flo
                     }
                     ImGui::Dummy(ImVec2(hw, size::field + 2));
                 }
+                nameRect("scene.tilebrushcellpicker", ImGui::GetCurrentWindow()->Rect());
                 ImGui::EndPopup();
             }
 
