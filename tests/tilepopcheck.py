@@ -39,16 +39,17 @@ def project():
     return d, scene
 
 
-def run(size, notches, shot=None):
+def run(size, to_row, shot=None):
     """Runs the editor at `size` (w, h): the inspector scrolled to its bottom
-    (the Tilemap section), Add tilemap (which grows the section), the wheel
-    `notches` further down, then a click on the Tile thumbnail. Returns its
+    (the Tilemap section), Add tilemap (which grows the section), then with
+    `to_row` the inspector scrolled just far enough to show the Tile row (which
+    leaves it at the window's bottom), else back to its end, then a click on the Tile thumbnail. Returns its
     output (without its controls) and the named controls of the last frame."""
     d, scene = project()
     shot_path = os.path.join(d, 'shot.png')
     wheel = lambda n: ['--wheel', '1420,%d,%d' % (size[1] // 2, n), '--wait', '3']
     cmd = [editor, '--size', '%dx%d' % size, '--project', d, '--scene', scene, '--wait', '20', '--wait-export'] + wheel(-200) + \
-        ['--click', '@scene.tileadd', '--wait', '3'] + wheel(-notches) + \
+        ['--click', '@scene.tileadd', '--wait', '3'] + (['--scroll-to', '@scene.tilebrushcell', '--wait', '3'] if to_row else wheel(-200)) + \
         ['--click', '@scene.tilebrushcell', '--wait', '5', '--screenshot', shot_path]
     r = subprocess.run(cmd, capture_output=True, text=True, env=ENV, timeout=240)
     lines = (r.stdout + r.stderr).strip().splitlines()
@@ -64,10 +65,10 @@ def inside(r, size):
     return r[0] >= 0 and r[1] >= 0 and r[2] <= size[0] and r[3] <= size[1]
 
 
-def picker(size, notches, where, shot=None):
+def picker(size, to_row, where, shot=None):
     """Opens the picker and checks it is wholly inside the window, `where`
     ('above' or 'below') the Tile row and right-aligned with it."""
-    out, rects = run(size, notches, shot)
+    out, rects = run(size, to_row, shot)
     thumb, num, pick = 'scene.tilebrushcell', 'scene.tilebrushcellnum', 'scene.tilebrushcellpicker'
     if thumb not in rects or num not in rects or pick not in rects:
         check('%dx%d: the Tile row and its picker are drawn' % size, False, (sorted(rects)[:30], out[-300:]))
@@ -85,9 +86,10 @@ def picker(size, notches, where, shot=None):
 
 
 # Scrolled to the bottom, a 960 px window leaves room under the Tile row; in a
-# 600 px one, 4 notches down after Add put the row about 40 px above the bottom.
-picker((1600, 960), 200, 'below')
-picker((1600, 600), 4, 'above', shot_to)
+# 600 px one Add pushes the row under the window, and scrolling it back into
+# view leaves it at the bottom.
+picker((1600, 960), False, 'below')
+picker((1600, 600), True, 'above', shot_to)
 
 print(f'{checks - fails}/{checks} checks passed')
 print(f'{fails} failures')
