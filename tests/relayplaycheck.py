@@ -101,6 +101,11 @@ args += ['--click', '@game.console2', '--wait', '20', '--click', '@playstatus', 
          '--click', '@net.type.Snapshot', '--wait', '20']
 if shots:
     args += ['--shot', shots + '-network-nosnap.png']
+# Pings, Pongs, acks and object traffic come far more often than Events, so
+# the newest rows are rarely an Event: hide them too before reading the rows.
+for t in ('Ping', 'Pong', 'HelloAck', 'EventAck', 'ObjectState', 'AppData'):
+    args += ['--click', '@net.type.' + t, '--wait', '5']
+args += ['--wait', '20']
 # Back to console 2's output, filtered to the crate the host moved.
 args += ['--click', '@play.tab.output', '--wait', '10', '--click', '@play.filter', '--wait', '3', '--key', 'escape', '--wait', '3',
          '--text', 'cratecheck: moved', '--wait', '60']
