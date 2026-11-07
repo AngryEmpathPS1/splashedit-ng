@@ -1424,11 +1424,24 @@ std::vector<uint32_t> render(const splash::Scene& scene, const std::vector<bool>
                         tw = sh->cellW;
                         th = sh->cellH;
                     }
-                    // UVs run 0..size-1 across the rect, as the export writes them;
-                    // the rasteriser leaves out the last column and row.
+                    if (r.w <= 0 || r.h <= 0) break;
+                    // The texel each column (row) shows, as psxsplash#135 draws it.
+                    // At 1:1 a sprite: one texel per pixel. Scaled, two triangles
+                    // whose UVs run from the first texel to one past the last below
+                    // 2x, to the last itself from 2x up; the GPU interpolates them
+                    // across the n pixels and rounds to nearest, a half up
+                    // (core/gpu_raster's lerp), which is the identity at 1:1 too.
+                    // Not modelled: an atlas UV of 255 keeps the inclusive end.
+                    auto texels = [](int size, int n) {
+                        std::vector<int> out(size_t(n), 0);
+                        const int64_t span = n < 2 * size ? size : size - 1;
+                        for (int i = 0; i < n; i++) out[size_t(i)] = std::min(size - 1, int((2 * i * span + n) / (2 * n)));
+                        return out;
+                    };
+                    const std::vector<int> us = texels(tw, r.w), vs = texels(th, r.h);
                     for (int y = 0; y < r.h; y++)
                         for (int x = 0; x < r.w; x++) {
-                            const int u = u0 + int(int64_t(x) * (tw - 1) / r.w), v = v0 + int(int64_t(y) * (th - 1) / r.h);
+                            const int u = u0 + us[size_t(x)], v = v0 + vs[size_t(y)];
                             const uint16_t w = t.words[size_t(v) * size_t(t.width) + size_t(u)];
                             if (w) f.put(r.x + x, r.y + y, tint(w, e.color));
                         }

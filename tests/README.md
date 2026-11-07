@@ -434,8 +434,10 @@ the glyph sheet export builds and prints its cell size and VRAM cost.
 
 `ui/ui.scene` booted with `boot/boot.sh` at frame 300 shows both Inter fonts, the system font, the
 progress bar, the image, a line ending at x 311 and the full-width bar, at the positions above.
-That frame is kept as `ui/ui-runtime.png` (psxsplash 669fb6b): `editor_tests` renders the scene
-with the UI tab's preview and requires the same pixels in 15-bit colour.
+That frame is kept as `ui/ui-runtime.png` (psxsplash 669fb6b; the image 'crate', 248..311 x
+80..143, from the same boot of psxsplash 4374c86, which draws 1:1 images one texel per pixel,
+psxsplash#135): `editor_tests` renders the scene with the UI tab's preview and requires the same
+pixels in 15-bit colour.
 
 `uicanvascheck.py` drives the UI tab (the canvas editor) on a copy of `ui/ui.scene`, started with
 `--ui`, which opens the tab and prints where the canvas and the element list are. It drags an
