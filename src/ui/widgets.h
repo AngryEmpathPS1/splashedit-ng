@@ -112,7 +112,8 @@ struct FieldEdit {
 
 // A number in a well. With `edit`, it is editable: drag horizontally to
 // scrub (faster for larger values, Shift for fine steps), double-click to
-// type (Enter or clicking away commits, Esc cancels). `value` is the text shown.
+// type (Enter or clicking away commits, Esc cancels; while typing, Up and Down
+// step the typed value by ui::keyStep). `value` is the text shown.
 // An `integer` field (pixels, frames) scrubs one per pixel (ui/scrub.hh).
 // A `mixed` field stands for several objects whose values differ (#263):
 // `value` is drawn faint, typing starts empty, and any typed number counts
@@ -141,9 +142,11 @@ bool textEditing(const char* id);
 void textEditNewFrame();
 // `maxLen` caps what can be typed, in bytes (at most 255). `charFilter`, when
 // given, sees each typed character (ImGuiInputTextFlags_CallbackCharFilter):
-// it may change EventChar, or return 1 to drop it.
+// it may change EventChar, or return 1 to drop it. With `upDown`, it edits a
+// number: Up and Down step the typed value by upDown(Shift held) (ui/scrub.hh
+// stepTyped) and stay in the field rather than moving the keyboard focus.
 TextEdit textEdit(const char* id, ImRect field, ImFont* font, float size, float textX, float textRight, std::string* out,
-                  size_t maxLen = 255, ImGuiInputTextCallback charFilter = nullptr);
+                  size_t maxLen = 255, ImGuiInputTextCallback charFilter = nullptr, float (*upDown)(bool shift) = nullptr);
 // A one-line text value in a field well: a click starts typing, Enter or
 // clicking away commits, Esc cancels. Returns true on the frame a changed
 // value is committed, with it in `out`. `placeholder` shows faint while the

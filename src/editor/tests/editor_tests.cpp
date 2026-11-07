@@ -15647,6 +15647,32 @@ void testNumberScrub() {
     CHECK(std::fabs(drag(2.0f, {1}, false, false) - 2.02f) < 1e-4f);
 }
 
+// Up and Down in a number field being typed into step the typed value (#158):
+// one for whole numbers, a tenth otherwise (a hundredth with Shift); what is
+// no number is left alone.
+void testNumberKeyStep() {
+    auto step = [](std::string t, int dir, float by) {
+        return ui::stepTyped(t, dir, by) ? t : "(none) " + t;
+    };
+    CHECK(ui::keyStep(true, false) == 1 && ui::keyStep(true, true) == 1);
+    CHECK(ui::keyStep(false, false) == 0.1f && ui::keyStep(false, true) == 0.01f);
+    CHECK(step("8", 1, 1) == "9");
+    CHECK(step("8", -1, 1) == "7");
+    CHECK(step("0", -1, 1) == "-1");
+    CHECK(step(" 12 ", 1, 1) == "13");  // spaces around it, as the commit takes them
+    CHECK(step("1", -1, 1) == "0");
+    CHECK(step("0.2", 1, 0.1f) == "0.3");
+    CHECK(step("0.1", -1, 0.1f) == "0");
+    CHECK(step("0.25", 1, 0.1f) == "0.35");
+    CHECK(step("-0.05", 1, 0.1f) == "0.05");
+    CHECK(step("", 1, 1) == "(none) ");
+    CHECK(step("-", 1, 1) == "(none) -");
+    CHECK(step("12px", 1, 1) == "(none) 12px");
+    std::string t = "2";
+    for (int i = 0; i < 10; i++) CHECK(ui::stepTyped(t, 1, 0.1f));
+    CHECK(t == "3");
+}
+
 // A scrub on a "mixed" multi-object field (#263) moves each value by the
 // drag's change, so each keeps its offset; a clamp stops only the one it
 // reaches; a whole-number field rounds each result.
@@ -19894,6 +19920,7 @@ int main(int argc, char** argv) {
     testSpriteDirectionSets();
     testUiSprite();
     testNumberScrub();
+    testNumberKeyStep();
     testMixedScrub();
     testDialogGate();
     testColourHex();
