@@ -149,6 +149,7 @@ jobs:
           "$py" tests/blendcheck.py "$cli"
           "$py" tests/disccheck.py "$cli"
           "$py" tests/playercheck.py "$cli"
+          "$py" tests/discmoviecheck.py "$cli"
           "$py" tests/cddacheck.py "$cli"
           "$py" tests/templatecheck.py "$cli"
           "$py" tests/samplecheck.py "$cli"
@@ -295,6 +296,9 @@ jobs:
       - name: Disc settings
         if: runner.os == 'Linux'
         run: LIBGL_ALWAYS_SOFTWARE=1 xvfb-run -a -s "-screen 0 1600x960x24" python3 tests/discsettingscheck.py build/splashedit
+      - name: Disc movies list
+        if: runner.os == 'Linux'
+        run: LIBGL_ALWAYS_SOFTWARE=1 xvfb-run -a -s "-screen 0 1600x1300x24" python3 tests/discmovielistcheck.py build/splashedit
       - name: Disc licence builder
         if: runner.os == 'Linux'
         run: LIBGL_ALWAYS_SOFTWARE=1 xvfb-run -a -s "-screen 0 1600x960x24" python3 tests/licencebuildcheck.py build/splashedit
