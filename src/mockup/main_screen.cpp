@@ -9885,6 +9885,11 @@ static void sceneInspector(State& st, ImDrawList* dl, ImRect r, float y, editor:
         for (int i = 0; i < nFrames + (nFrames < int(splash::kMemCardIconsMax) ? 1 : 0); i++) {
             ImRect tr(ImVec2(iv.Min.x + i * (tile + gap), ty), ImVec2(iv.Min.x + i * (tile + gap) + tile, ty + tile));
             ImGui::PushID(i);
+            // An image dragged from the Project panel lands on a frame (replacing
+            // it) or on Add (a new frame), as on a Texture field (#160).
+            ImRect shownTile = tr;
+            shownTile.ClipWith(ImRect(dl->GetClipRectMin(), dl->GetClipRectMax()));
+            slotTarget(st, static_cast<int>(AssetSlot::MemCardIcon), {}, tr, shownTile, i == nFrames ? -1 : i);
             if (i == nFrames) {
                 Hit h = interact("mcadd", tr);
                 tooltip(nFrames ? "Add a frame: 2 or 3 frames animate. Pick several images to add them at once." : iconTip);
@@ -9893,6 +9898,7 @@ static void sceneInspector(State& st, ImDrawList* dl, ImRect r, float y, editor:
                 textCentered(dl, ImRect(tr.Min, ImVec2(tr.Max.x, tr.Max.y - 14)), f.medium, type::icon, color::textDim, icon::plus);
                 textCentered(dl, ImRect(ImVec2(tr.Min.x, tr.Max.y - 26), ImVec2(tr.Max.x, tr.Max.y - 6)), f.regular, type::caption,
                              color::textFaint, nFrames ? "Add frame" : "Add icon");
+                nameRect("scene.mcicon.add", tr);
                 if (h.clicked) pickAsset(AssetSlot::MemCardIcon, {}, -1);
             } else {
                 const editor::MemCardIcon::Frame& fr = icn.frames[size_t(i)];

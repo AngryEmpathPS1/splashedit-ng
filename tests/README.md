@@ -671,6 +671,14 @@ sections above and clicks the controls by name (`--click @s_render`, `@scene.mce
 
     python3 memcardeditcheck.py <splashedit>
 
+`memcardiconcheck.py` drags a 16x16 PNG from the Project panel onto the memory card Icon in the
+scene inspector (#160): dropped on Add it becomes a new frame, on a frame it replaces it, and a
+scene dropped there is refused ("That field does not take ..."). It scrolls to the Icon row with
+`--scroll-to @scene.mcicon.add` / `@scene.mcicon.0`, reads where it is drawn, drags there in a
+second run and reads `settings.memCard.icons` back from the saved scene. Needs a display.
+
+    python3 memcardiconcheck.py <splashedit>
+
 `spritesheetcheck.py` drives the scene inspector's Sprite sheets section (its last) on copies of the
 courtyard example with `sprite/hero.png` added to its textures: Add sheet picks the image and makes
 sheet `hero` (4 bpp, 16x16 cells, one `idle` animation); a typed cell width, an added animation and
