@@ -12232,9 +12232,10 @@ void testUiRender() {
     isc.canvases[0].elements.push_back(im);
     std::vector<uint32_t> ip = render(isc, {true}, s, assets, bg);
     auto iat = [&](int x, int y) { return ip[size_t(y) * 320 + size_t(x)]; };
-    // u = x * (3 - 1) / 6: red, red, red, green, green, green; blue never shows.
-    CHECK(iat(10, 10) == 0xff0000ffu && iat(12, 11) == 0xff0000ffu);
-    CHECK(iat(13, 10) == 0xff00ff00u && iat(15, 11) == 0xff00ff00u && iat(16, 10) == bg);
+    // At 2x the UVs end on the last texel, rounded to nearest: red, red, green, green, green, blue.
+    CHECK(iat(10, 10) == 0xff0000ffu && iat(11, 11) == 0xff0000ffu);
+    CHECK(iat(12, 10) == 0xff00ff00u && iat(14, 11) == 0xff00ff00u);
+    CHECK(iat(15, 10) == 0xffff0000u && iat(15, 11) == 0xffff0000u && iat(16, 10) == bg);
     isc.canvases[0].elements[0].color = {0.25f, 0.25f, 0.25f};  // tint 64: half as bright
     std::vector<uint32_t> dim = render(isc, {true}, s, assets, bg);
     CHECK(dim[10 * 320 + 10] == 0xff00007bu);
@@ -14671,7 +14672,7 @@ void testUiSprite() {
         auto ex = [](int c5) { return uint32_t((c5 << 3) | (c5 >> 2)); };
         for (int y = 0; y < 16 && t.error.empty(); y++)
             for (int x = 0; x < 16; x++) {
-                const uint16_t w = t.words[size_t(16 + y * 15 / 16) * 64 + size_t(32 + x * 15 / 16)];
+                const uint16_t w = t.words[size_t(16 + y) * 64 + size_t(32 + x)];  // 1:1: one texel per pixel
                 const uint32_t want = w ? 0xff000000u | (ex((w >> 10) & 31) << 16) | (ex((w >> 5) & 31) << 8) | ex(w & 31) : 0u;
                 const uint32_t got = px[size_t(20 + y) * size_t(s.w) + size_t(10 + x)];
                 bad += got != want;
@@ -17336,6 +17337,107 @@ gpuraster::Gpu gpdRender(const std::vector<uint32_t>& frame, std::vector<uint32_
     return gpu;
 }
 
+// ---- UI image preview: which texel each pixel shows (splashedit-ng#331).
+
+// The texel (u << 8 | v) at each pixel of a w x h image drawn from a tw x th
+// texture as psxsplash#135 draws a scaled one: two gouraud triangles over the
+// rect, UVs from 0 to tw (th) below 2x, else to tw - 1 (th - 1), through the
+// gpu_raster model. Texel (u, v) is the 15-bit word v * 128 + u + 1 at 512,0.
+std::vector<int> uiImageGpuTexels(int tw, int th, int w, int h) {
+    std::vector<uint32_t> f = {0xa0000000, gpdXY(512, 0), gpdXY(tw, th)};
+    for (int i = 0; i < tw * th; i += 2) {
+        auto word = [&](int k) { return k < tw * th ? uint32_t((k / tw) * 128 + k % tw + 1) : 0u; };
+        f.push_back(word(i) | word(i + 1) << 16);
+    }
+    const uint32_t uR = w < 2 * tw ? tw : tw - 1, vB = h < 2 * th ? th : th - 1, page = 0x108u << 16;  // 15-bit, x 512
+    auto vtx = [&](uint32_t cmd, int x, int y, uint32_t u, uint32_t v, uint32_t extra) {
+        f.insert(f.end(), {cmd | 0x808080, gpdXY(x, y), extra | v << 8 | u});
+    };
+    vtx(0x35000000, 0, 0, 0, 0, 0), vtx(0, w, 0, uR, 0, page), vtx(0, 0, h, 0, vB, 0);         // raw: texels as they are
+    vtx(0x35000000, w, 0, uR, 0, 0), vtx(0, w, h, uR, vB, page), vtx(0, 0, h, 0, vB, 0);
+    gpuraster::Options o;
+    o.dither = false;
+    const gpuraster::Gpu g = gpdRender(f, {}, o);
+    std::vector<int> out;
+    for (int y = 0; y < h; y++)
+        for (int x = 0; x < w; x++) {
+            const int k = (g.at(x, y) & 0x7fff) - 1;
+            out.push_back(k < 0 ? -1 : (k % 128) << 8 | k / 128);
+        }
+    return out;
+}
+
+void testUiImageTexels() {
+    using namespace editor::uic;
+    const Screen s;
+    // A texture whose every texel is its own colour: (u, v) is red u & 31, green 16 + u / 32, blue v.
+    auto texture = [](const char* name, int tw, int th) {
+        splash::Image img;
+        img.width = tw;
+        img.height = th;
+        for (int v = th - 1; v >= 0; v--)  // splash::Image rows run bottom-up
+            for (int u = 0; u < tw; u++) img.pixels.push_back({(u & 31) / 31.f, (16 + u / 32) / 31.f, v / 31.f, 1});
+        splash::savePng(img, g_outDir / name);
+    };
+    // The texel (u << 8 | v) at each pixel of the preview of `name` drawn at w x h, -1 for none.
+    auto preview = [&](const char* name, int w, int h) {
+        splash::Scene sc;
+        sc.canvases.resize(1);
+        splash::UIElement im = uiBox("im", 16, 40, w, h);
+        im.type = splash::UIElementType::Image;
+        im.texture = name;
+        im.bitDepth = splash::BitDepth::Bpp16;
+        im.color = {0.5f, 0.5f, 0.5f};  // tint 128: the texels as they are
+        sc.canvases[0].elements.push_back(im);
+        Assets assets;
+        assets.refresh(g_outDir, 0);
+        const std::vector<uint32_t> px = render(sc, {true}, s, assets, 0);
+        auto c5 = [](uint32_t p, int sh) { return int((p >> sh) & 0xff) >> 3; };
+        std::vector<int> out;
+        for (int y = 0; y < h; y++)
+            for (int x = 0; x < w; x++) {
+                const uint32_t p = px[size_t(40 + y) * size_t(s.w) + size_t(16 + x)];
+                out.push_back(p ? (c5(p, 0) | (c5(p, 8) - 16) << 5) << 8 | c5(p, 16) : -1);
+            }
+        return out;
+    };
+    // Measured in pcsx-redux from psxsplash#135 (scene uiimg.scene, a 128x13
+    // one-texel checkerboard at 1:1, 2x and 1.5x): how many pixels each texel
+    // takes, per column (u) and per row (v), the same in every row and column.
+    struct Case {
+        int w, h;
+        const char *uRuns, *vRuns;
+    };
+    const std::string one(128, '1'), twos = std::string(64, '2') + "3" + std::string(62, '2') + "1",
+                      halves = [] { std::string r; for (int i = 0; i < 64; i++) r += "12"; return r; }();
+    const Case cases[] = {{128, 13, one.c_str(), "1111111111111"},
+                          {256, 26, twos.c_str(), "2222223222221"},
+                          {192, 19, halves.c_str(), "1212121121212"}};
+    texture("uitexels.png", 128, 13);
+    for (const Case& c : cases) {
+        std::vector<int> want;
+        auto expand = [](const char* runs) {
+            std::vector<int> seq;
+            for (int k = 0; runs[k]; k++) seq.insert(seq.end(), size_t(runs[k] - '0'), k);
+            return seq;
+        };
+        const std::vector<int> us = expand(c.uRuns), vs = expand(c.vRuns);
+        CHECK(int(us.size()) == c.w && int(vs.size()) == c.h);
+        for (int y = 0; y < c.h; y++)
+            for (int x = 0; x < c.w; x++) want.push_back(us[size_t(x)] << 8 | vs[size_t(y)]);
+        const std::vector<int> got = preview("uitexels.png", c.w, c.h);
+        int bad = 0;
+        for (size_t i = 0; i < got.size(); i++) bad += got[i] != want[i];
+        if (bad) std::fprintf(stderr, "uiimage %dx%d: %d of %zu pixels show another texel\n", c.w, c.h, bad, got.size());
+        CHECK(bad == 0);
+        CHECK(uiImageGpuTexels(128, 13, c.w, c.h) == want);  // the model agrees with redux
+    }
+    // Neither square nor a whole scale: 5x3 at 7x4, against the model.
+    texture("uitexels53.png", 5, 3);
+    const std::vector<int> got = preview("uitexels53.png", 7, 4), model = uiImageGpuTexels(5, 3, 7, 4);
+    CHECK(got == model && model.front() == 0 && model.back() == (4 << 8 | 2));
+}
+
 void testGpuDumpParse() {
     namespace fs = std::filesystem;
     // A polygon that starts in one GP0 packet and ends in the next, a GP1 word between them.
@@ -19878,6 +19980,7 @@ int main(int argc, char** argv) {
     testUiMultiSelect();
     testUiProblems();
     testUiRender();
+    testUiImageTexels();
     testUiMatchesRuntime();
     testLoaderPack();
     testExportCanvasDefaultFont();
