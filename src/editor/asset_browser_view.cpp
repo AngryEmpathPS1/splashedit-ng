@@ -195,6 +195,22 @@ void AssetBrowser::draw(ImDrawList* dl, editor::Document& doc) {
     }
     m_refs.update(m_index, doc.scene(), m_openScene, doc.revision());
     m_folderTargets.clear();
+    if (!m_reveal.empty()) {
+        const AssetEntry* e = m_index.find(m_reveal);
+        const size_t slash = m_reveal.rfind('/');
+        m_folder = e ? e->folder : slash == std::string::npos ? std::string() : m_reveal.substr(0, slash);
+        if (!m_folder.empty() && !m_index.find(m_folder)) m_folder.clear();
+        m_query.clear();
+        m_types = 0;
+        for (std::string a = m_folder; !a.empty();) {
+            m_collapsed[a] = false;
+            const size_t s = a.rfind('/');
+            a = s == std::string::npos ? std::string() : a.substr(0, s);
+        }
+        m_selected = e ? m_reveal : std::string();
+        m_scrollToSelected = e != nullptr;
+        m_reveal.clear();
+    }
 
     const ImRect r = m_rect;
     if (ImGui::IsMouseClicked(ImGuiMouseButton_Left) || ImGui::IsMouseClicked(ImGuiMouseButton_Right)) {
@@ -529,6 +545,15 @@ void AssetBrowser::files(ImDrawList* dl, ImRect r, editor::Document& doc) {
     const float contentH = listTop + rowsN * itemH + space::sm;
     const bool popup = ImGui::IsPopupOpen("", ImGuiPopupFlags_AnyPopupId);
     if (r.Contains(io.MousePos) && io.MouseWheel != 0 && !popup) m_scroll -= io.MouseWheel * itemH * (m_list ? 3 : 1);
+    if (m_scrollToSelected) {
+        m_scrollToSelected = false;
+        const auto it = std::find(m_shown.begin(), m_shown.end(), m_selected);
+        if (it != m_shown.end()) {
+            const float top = listTop + float((it - m_shown.begin()) / cols) * itemH;
+            if (top < m_scroll) m_scroll = top;
+            else if (top + itemH > m_scroll + inner.GetHeight()) m_scroll = top + itemH - inner.GetHeight();
+        }
+    }
     m_scroll = std::clamp(m_scroll, 0.0f, std::max(0.0f, contentH - inner.GetHeight()));
 
     ImGui::PushClipRect(r.Min, r.Max, true);
@@ -709,6 +734,11 @@ void AssetBrowser::footer(ImDrawList* dl, ImRect r) {
 }
 
 // --- actions ---
+
+void AssetBrowser::reveal(const std::string& path) {
+    m_reveal = path;
+    open = true;
+}
 
 void AssetBrowser::openEntry(const AssetEntry& e) {
     if (e.type == AssetType::Folder) {

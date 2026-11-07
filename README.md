@@ -8,6 +8,8 @@ Standalone scene editor for [psxsplash](https://github.com/psxsplash/psxsplash),
 
 `engine/` holds psxsplash.ps-exe, which Play and Run on hardware boot, psxsplash-cdrom.ps-exe for disc images, and builds with on-screen debug overlays: Build > Performance Overlay (FPS counter and heap bar) and Room Debug Overlay (room wireframe) make Play and Run on hardware boot psxsplash-perf, psxsplash-rooms or psxsplash-perf-rooms instead. Disc images always get the plain CD-ROM build. Each also comes as a -nologo build (psxsplash-nologo.ps-exe, psxsplash-cdrom-nologo.ps-exe, ...) without the psxsplash boot logo and jingle: turn off Build > Boot Logo in Test Runs to have Play and Run on hardware boot those, and set Boot logo to off in the scene inspector's Disc section to put psxsplash-cdrom-nologo on the disc. A psxsplash build you point at by hand with no -nologo build beside it boots with the logo, and the build report says so.
 
+Build > Export Standalone Player... writes a folder to zip and hand out to people who have never opened a disc image: the game's disc image in `game/`, a copy of the pcsx-redux that Play uses in `redux/`, its settings in `config/`, and a launcher at the top (`<Title>.exe` on Windows, wearing the memory card icon's first frame, `.command` on macOS, `.sh` on Linux) that starts the game full-window in pcsx-redux's kiosk mode, no menus and no BIOS needed. The folder runs on the system the editor runs on, since that is the only pcsx-redux it holds; make the Windows player on Windows and so on. The command line does the same with `splashpack-cli player`.
+
 ## Building
 
 Needs CMake 3.24+, a C++20 compiler, SDL3 and FreeType. Dear ImGui and stb are fetched at configure time.

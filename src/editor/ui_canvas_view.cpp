@@ -1303,7 +1303,7 @@ bool colourRow(editor::Document& doc, Rows& rows, const char* id, const char* la
     if (hit.clicked) ImGui::OpenPopup(popup.c_str());
     // Paste from the field's right-click menu: one undo step.
     if (hit.pasted) uic::editElement(doc, c, e, [&](UIElement& el) { set(el, *hit.pasted); });
-    ImGui::SetNextWindowPos(ImVec2(field.Max.x, field.Max.y + space::xs), ImGuiCond_Always, ImVec2(1, 0));
+    placePopupBelow(popup.c_str(), field, ImVec2(1, 0));
     pushMenuStyle();
     bool open = false;
     if (ImGui::BeginPopup(popup.c_str())) {
@@ -2047,6 +2047,22 @@ void CanvasView::fontsSection(ImDrawList* dl, float x0, float x1, float* yp, edi
             if (fh.changed)
                 uic::editFont(doc, i, [&](splash::UIFont& x) { x.glyphHeight = std::clamp(int(std::lround(h)), 4, 64); }, "uifontgh" + id);
             if (fh.done) doc.endMerge();
+            // Spacing, unless the scene file lists every advance itself.
+            if (uf.advances.empty()) {
+                ImRect mf = rows.row("lfmono", "Monospace", "Every character a full glyph cell wide, ink or not.");
+                const ImRect mt(ImVec2(mf.Min.x, mf.GetCenter().y - 8), ImVec2(mf.Min.x + 30, mf.GetCenter().y + 8));
+                nameRect(id + ".mono", mt);
+                if (toggle("fmono", mt, uf.monospace)) uic::editFont(doc, i, [](splash::UIFont& x) { x.monospace = !x.monospace; });
+                if (!uf.monospace) {
+                    ImRect gp = rows.row("lfgap", "Gap", "Empty columns after each character's ink, 0 to 16; 0 makes them touch.");
+                    nameRect(id + ".gap", gp);
+                    float g = float(uf.gap);
+                    FieldEdit fg = numberField("fgap", gp, std::to_string(uf.gap).c_str(), "px", 0, nullptr, &g, true);
+                    if (fg.changed)
+                        uic::editFont(doc, i, [&](splash::UIFont& x) { x.gap = std::clamp(int(std::lround(g)), 0, 16); }, "uifontgap" + id);
+                    if (fg.done) doc.endMerge();
+                }
+            }
         }
 
         // What the export makes of it, or why it cannot: one line, the whole reason in its tooltip.
@@ -2075,7 +2091,8 @@ void CanvasView::fontsSection(ImDrawList* dl, float x0, float x1, float* yp, edi
             FontSample& smp = m_samples[size_t(i)];
             const std::string key = uf.name + "|" + uf.source + "|" + uf.bitmap + "|" + std::to_string(uf.size) + "|" +
                                     std::to_string(uf.glyphWidth) + "x" + std::to_string(uf.glyphHeight) + "|" +
-                                    std::to_string(doc.assetsId()) + "|" + doc.projectRoot().string();
+                                    (uf.monospace ? "m" : "g" + std::to_string(uf.gap)) + "|" + std::to_string(doc.assetsId()) + "|" +
+                                    doc.projectRoot().string();
             if (!smp.tex || smp.key != key) {
                 uic::Screen size;
                 std::vector<uint32_t> px = uic::renderSample(doc.scene(), m_assets, uf.name, "AaBbCc 0123 !?", 0, &size);

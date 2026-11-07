@@ -4,6 +4,9 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
+#include <cstdlib>
+#include <string>
 
 namespace ui {
 
@@ -36,6 +39,32 @@ inline float scrubTo(float& acc, float dx, bool integer, bool fine) {
 inline float scrubOffset(float own, float from, float to, float lo, float hi, bool integer) {
     const float v = std::clamp(own + (to - from), lo, hi);
     return integer ? std::round(v) : v;
+}
+
+// Up and Down in a number field being typed into (#158) step the typed value
+// by this: one for a whole-number field, else a tenth (a hundredth with Shift,
+// finer as a scrub is).
+inline float keyStep(bool integer, bool fine) { return integer ? 1.0f : fine ? 0.01f : 0.1f; }
+
+// The typed `text` stepped `dir` (+1 Up, -1 Down) by `step`, written back as
+// the field shows a number to type over; false, `text` as it was, when it is
+// no number (an empty mixed field, a half-typed "-").
+inline bool stepTyped(std::string& text, int dir, float step) {
+    const char* s = text.c_str();
+    char* end = nullptr;
+    const float v = std::strtof(s, &end);
+    while (end && *end == ' ') ++end;
+    if (!end || end == s || *end != 0 || !std::isfinite(v)) return false;
+    float next = v + float(dir) * step;
+    // Float noise is taken off (0.1 + 0.2 shows 0.3); an off-grid value keeps
+    // its offset (0.25 steps to 0.35).
+    const float grid = std::round(next / step) * step;
+    if (std::fabs(grid - next) < step * 1e-3f) next = grid;
+    if (next == 0) next = 0;  // no "-0"
+    char b[32];
+    std::snprintf(b, sizeof b, "%.6g", static_cast<double>(next));
+    text = b;
+    return true;
 }
 
 }  // namespace ui

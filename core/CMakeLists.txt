@@ -78,6 +78,7 @@ add_library(splashcore STATIC
     blend.cpp
     blocks.cpp
     disc.cpp
+    player.cpp
     font.cpp
     licencesim.cpp
     licencetmd.cpp

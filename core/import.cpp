@@ -998,7 +998,23 @@ void finishImport(ImportedModel& out, Sink& baked, std::vector<NodeBuild>& nodes
 
     checkpoint(0.8f);
     fs::path meshFile = dir / (stem + ".mesh");
-    saveMesh(mesh, project / meshFile);
+    // A pivot set in the editor comes off the positions as they are written
+    // (after the textures baked from them); a skinned mesh stays in root space.
+    auto pivotOf = [&](const fs::path& file, const Mesh& m) -> std::optional<Vec3> {
+        if (m.skin) return std::nullopt;
+        auto it = settings.pivots.find(projectPath(file));
+        if (it == settings.pivots.end() || it->second == Vec3{}) return std::nullopt;
+        return it->second;
+    };
+    auto pivoted = [](const Mesh& m, Vec3 p) {
+        Mesh moved = m;
+        for (Vec3& v : moved.positions) v = v - p;
+        return moved;
+    };
+    if (std::optional<Vec3> p = pivotOf(meshFile, mesh))
+        saveMesh(pivoted(mesh, *p), project / meshFile);
+    else
+        saveMesh(mesh, project / meshFile);
     out.mesh = projectPath(meshFile);
     checkpoint(0.85f);
 
@@ -1028,6 +1044,7 @@ void finishImport(ImportedModel& out, Sink& baked, std::vector<NodeBuild>& nodes
         out.clips.push_back(projectPath(file));
     }
     std::set<std::string> taken;
+    std::vector<Vec3> nodePivot(nodes.size());  // by node: the pivot taken off its mesh
     for (NodeBuild& nb : nodes) {
         checkpoint(0.85f + 0.15f * float(out.nodes.size()) / float(nodes.size()));
         ImportedNode node;
@@ -1041,7 +1058,14 @@ void finishImport(ImportedModel& out, Sink& baked, std::vector<NodeBuild>& nodes
             for (int k = 2; taken.count(lower(name)); k++) name = base + "_" + std::to_string(k);
             taken.insert(lower(name));
             fs::path file = nodeDir / (name + ".mesh");
-            saveMesh(nb.local->mesh, project / file);
+            if (std::optional<Vec3> p = pivotOf(file, nb.local->mesh)) {
+                // The node's origin moves to the pivot, so the mesh stays where it was.
+                saveMesh(pivoted(nb.local->mesh, *p), project / file);
+                node.transform.position = node.transform.position + rotate(node.transform.rotation, scale(node.transform.scale, *p));
+                nodePivot[out.nodes.size()] = *p;
+            } else {
+                saveMesh(nb.local->mesh, project / file);
+            }
             node.mesh = projectPath(file);
             for (int i : nb.local->materials) {
                 node.materials.push_back(byIndex[size_t(i)]);
@@ -1050,6 +1074,9 @@ void finishImport(ImportedModel& out, Sink& baked, std::vector<NodeBuild>& nodes
         }
         out.nodes.push_back(std::move(node));
     }
+    // A child of a node whose origin moved keeps its place.
+    for (ImportedNode& node : out.nodes)
+        if (node.parent >= 0) node.transform.position = node.transform.position - nodePivot[size_t(node.parent)];
 }
 
 // A UTF-8 string as a path, Windows separators turned into slashes.
@@ -1803,6 +1830,11 @@ json settingsJson(const ImportSettings& s) {
         for (const auto& [k, v] : s.clipNames) names[k] = v;
         j["clipNames"] = names;
     }
+    if (!s.pivots.empty()) {
+        json pivots = json::object();
+        for (const auto& [k, v] : s.pivots) pivots[k] = {v.x, v.y, v.z};
+        j["pivots"] = pivots;
+    }
     return j;
 }
 
@@ -1854,10 +1886,19 @@ ImportSettings loadImportSettings(const fs::path& model) {
             if (!names.is_object()) fail(what + ": clipNames must be an object");
             for (auto& [k, v] : names.items()) s.clipNames[k] = v.get<std::string>();
         }
+        if (j.contains("pivots")) {
+            const json& pivots = j["pivots"];
+            if (!pivots.is_object()) fail(what + ": pivots must be an object");
+            for (auto& [k, v] : pivots.items()) {
+                if (!v.is_array() || v.size() != 3 || !v[0].is_number() || !v[1].is_number() || !v[2].is_number())
+                    fail(what + ": the pivot of " + k + " must be three numbers");
+                s.pivots[k] = Vec3{v[0].get<float>(), v[1].get<float>(), v[2].get<float>()};
+            }
+        }
         json written = settingsJson(s);
         for (auto& [k, v] : j.items())
             if (!written.contains(k) && k != "targetTriangles" && k != "sourceTriangles" && k != "bakeDetail" &&
-                k != "bakeLost")
+                k != "bakeLost" && k != "pivots")
                 s.extra.push_back({k, v.dump()});
     } catch (const json::exception& e) {
         fail(what + ": " + e.what());

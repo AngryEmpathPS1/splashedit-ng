@@ -1,0 +1,3 @@
+// The stub's icon, group 1: Export Standalone Player puts the game's in its
+// place (splash::setExeIcon).
+1 ICON "@SPLASHEDIT_ICON@"

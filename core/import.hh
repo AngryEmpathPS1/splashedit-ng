@@ -97,6 +97,15 @@ struct ImportSettings {
     // the full one baked into each base colour texture (see bakeLostDetail).
     // Saved only on.
     bool bakeLost = false;
+    // A mesh's pivot moved in the editor (Set pivot), by the project-relative
+    // .mesh the import writes, as MeshComponent::mesh holds it
+    // ("models/<stem>.mesh", "models/<stem>/<node>.mesh"): where the new
+    // origin is in that mesh's space after scale and up axis, summed over
+    // every move. The import takes it off the mesh's positions and, for a
+    // node mesh, puts it on the node's translation and off its children's, so
+    // nothing moves. A skinned mesh ignores it (it stays in root space).
+    // Saved only when there are any.
+    std::map<std::string, Vec3> pivots;
     ExtraKeys extra;
 };
 

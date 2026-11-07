@@ -144,6 +144,8 @@ struct Args {
     std::string dropFile;
     // --export-to <file.bin>: Export writes there instead of asking.
     std::string exportTo;
+    // --export-player-to <dir>: Export Standalone Player writes there instead of asking.
+    std::string playerTo;
     // --play-settings <file>: a screenshot run reads and saves Play's tools there.
     std::string playSettings;
     float dropX = -1, dropY = -1;
@@ -386,6 +388,7 @@ Args parse(int argc, char** argv) {
         else if (!std::strcmp(argv[i], "--frame")) a.frame = next();
         else if (!std::strcmp(argv[i], "--ui")) a.ui = true;
         else if (!std::strcmp(argv[i], "--export-to")) a.exportTo = next();
+        else if (!std::strcmp(argv[i], "--export-player-to")) a.playerTo = next();
         else if (!std::strcmp(argv[i], "--play-settings")) a.playSettings = next();
         else if (!std::strcmp(argv[i], "--click") || !std::strcmp(argv[i], "--dblclick")) {
             Action act(!std::strcmp(argv[i], "--click") ? Action::Click : Action::DoubleClick);
@@ -766,6 +769,7 @@ int main(int argc, char** argv) {
         state.newProject.templatesDir = std::filesystem::path(std::u8string(templates.begin(), templates.end()));
     }
     state.play.exportTo = std::filesystem::path(std::u8string(args.exportTo.begin(), args.exportTo.end()));
+    state.play.playerTo = std::filesystem::path(std::u8string(args.playerTo.begin(), args.playerTo.end()));
     // Play's tool paths persist per user; screenshot runs read only the environment.
     if (!args.screenshot) {
         if (char* pref = SDL_GetPrefPath("psxsplash", "splashedit")) {
@@ -835,7 +839,7 @@ int main(int argc, char** argv) {
     // The live export is running, or its last result is for an older revision of the scene.
     const auto playBuilding = [&] {
         return state.play.build.valid() || state.play.hwBuild.valid() || state.play.disc.valid() ||
-               state.play.licencePreview.emu.running();
+               state.play.player.valid() || state.play.licencePreview.emu.running();
     };
     // An open meter fixes list (#194) also holds it until its fixes are
     // measured for this revision and the before/after thumbnails converted.
@@ -1067,6 +1071,7 @@ int main(int argc, char** argv) {
             for (const std::string& w : state.importPanel.shown) std::printf("  import warning: %s\n", w.c_str());
             std::printf("project panel open: %s\n", state.assets.open ? "yes" : "no");
             std::printf("project panel: %s\n", state.assets.shownList().c_str());
+            std::printf("project panel selected: %s\n", state.assets.selected().empty() ? "(none)" : state.assets.selected().c_str());
             for (const auto& [name, r] : ui::namedRects())
                 std::printf("control %s at %d,%d %d,%d\n", name.c_str(), int(r.Min.x), int(r.Min.y), int(r.Max.x), int(r.Max.y));
             running = false;
