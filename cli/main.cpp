@@ -134,22 +134,26 @@ static int usage() {
                  "       splashpack-cli font <bitmap.png> --cell <w>x<h> -o <sheet.png>\n"
                  "  builds one UI font sheet the way export does and prints its cell size and height\n"
                  "usage: splashpack-cli gpudump <capture.gpd> [--vram <out.raw>] [--owner <out.raw>] [--list] [--redux]\n"
+                 "                              [--names <scene.splashpack>]\n"
                  "  replays a GPU dump in the frame debugger's rasterizer and prints its packet, command and\n"
                  "  primitive counts; --vram writes the final 1024x512 VRAM (16-bit little endian),\n"
                  "  --owner the command index that last wrote each pixel (32-bit), --list prints one line per\n"
                  "  drawing command, --redux renders as pcsx-redux's software GPU does (no dithering, textured\n"
-                 "  gouraud shaded a pixel pair at a time) instead of as psx-spx describes the hardware\n");
+                 "  gouraud shaded a pixel pair at a time) instead of as psx-spx describes the hardware;\n"
+                 "  --list shows psxsplash capture tags (object, triangle, OT slot), --names takes the object\n"
+                 "  names from the pack the captured scene was exported to\n");
     return 2;
 }
 
 static int gpudumpCmd(int argc, char** argv) {
-    std::string in, vramOut, ownerOut;
+    std::string in, vramOut, ownerOut, namesFrom;
     bool list = false, redux = false;
     for (int i = 2; i < argc; i++) {
         std::string a = argv[i];
         if (a == "--vram" && i + 1 < argc) vramOut = argv[++i];
         else if (a == "--owner" && i + 1 < argc) ownerOut = argv[++i];
         else if (a == "--list") list = true;
+        else if (a == "--names" && i + 1 < argc) namesFrom = argv[++i];
         else if (a == "--redux") redux = true;
         else if (in.empty() && a[0] != '-') in = a;
         else return usage();
@@ -164,10 +168,25 @@ static int gpudumpCmd(int argc, char** argv) {
     const gpudump::CommandList cl = gpudump::decode(dump);
     std::printf("packets %zu commands %zu primitives %zu frames %d%s%s\n", dump.packets.size(), cl.commands.size(),
                 cl.drawn.size(), cl.frames, dump.truncated ? " truncated" : "", cl.incomplete ? " incomplete" : "");
+    gpudump::TagScene scene;
+    if (cl.tagged) {
+        std::printf("tagged %d\n", cl.tagged);
+        if (!namesFrom.empty()) {
+            if (!gpudump::loadTagScene(fs::path(namesFrom), scene, &err)) {
+                std::fprintf(stderr, "%s: %s\n", namesFrom.c_str(), err.c_str());
+                return 1;
+            }
+            if (gpudump::matchTagScene(cl, {scene}) < 0) std::printf("warning: the tags do not fit %s\n", namesFrom.c_str());
+        }
+    }
     if (list)
         for (size_t i = 0; i < cl.drawn.size(); i++) {
             const gpudump::Command& c = cl.commands[size_t(cl.drawn[i])];
-            std::printf("#%zu cmd %d %s %08x\n", i, cl.drawn[i], gpudump::typeName(c).c_str(), c.op);
+            if (c.tag.present)
+                std::printf("#%zu cmd %d %s %08x  %s\n", i, cl.drawn[i], gpudump::typeName(c).c_str(), c.op,
+                            gpudump::tagText(c.tag, scene.objects.empty() ? nullptr : &scene).c_str());
+            else
+                std::printf("#%zu cmd %d %s %08x\n", i, cl.drawn[i], gpudump::typeName(c).c_str(), c.op);
         }
     gpuraster::Gpu gpu;
     if (redux) gpu.options = gpuraster::Options::redux();

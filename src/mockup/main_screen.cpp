@@ -222,7 +222,7 @@ static void pollFrameCapture(State& st) {
         return;
     }
     std::string err;
-    if (!st.frame.load(dir / "capture.gpd", &err)) {
+    if (!st.frame.load(dir / "capture.gpd", &err, playDir())) {
         notify(st, "Capture frame: " + err, true);
         return;
     }

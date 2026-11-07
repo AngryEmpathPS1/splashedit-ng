@@ -10,7 +10,9 @@
 // Scripted runs print `frame: loaded <file> ...`, `frame: prims N`,
 // `frame: step s/N`, `frame: selected #i <type> ...` and, for a click on
 // the image, `frame: pick x,y -> #i <type>` (x,y in VRAM; `-> none` for a
-// pixel nothing drew, `-> setup` for one the capture's VRAM restore wrote).
+// pixel nothing drew, `-> setup` for one the capture's VRAM restore wrote),
+// followed by ` obj <name> tri <n> slot <s>` (and ` fog`) when the primitive
+// carries a psxsplash capture tag (`obj #<index>` when no pack names it).
 #pragma once
 
 #include <imgui.h>
@@ -45,7 +47,9 @@ public:
     bool noticeBad = false;
 
     // Opens a capture: shows the whole frame, nothing selected. False, with `error` set, when it cannot.
-    bool load(const std::filesystem::path& file, std::string* error);
+    // When its polygons carry psxsplash capture tags, their object names come from the
+    // scene_<i>.splashpack (matchTagScene) in `packs`, else in the capture's own directory.
+    bool load(const std::filesystem::path& file, std::string* error, const std::filesystem::path& packs = {});
     bool loaded() const { return m_loaded; }
     // Takes the bottom of `area` (with a drag bar to resize) when open; returns what is left above.
     ImRect dock(ImRect area);
@@ -64,6 +68,7 @@ private:
     void pick(int x, int y);
     void sync();  // replays to the step and uploads the textures when stale
     void takePicked();
+    void findTagScene(const std::filesystem::path& dir);
     size_t replayTarget() const;
     int primitiveOf(int command) const;
 
@@ -71,6 +76,9 @@ private:
     std::filesystem::path m_file;
     gpudump::Dump m_dump;
     gpudump::CommandList m_list;
+    // The scene the capture tags name objects of; m_tagNote says which pack, or why none.
+    std::unique_ptr<gpudump::TagScene> m_tagScene;
+    std::string m_tagNote;
     gpuraster::Gpu m_gpu;
     int m_step = 0;        // primitives drawn: 0 .. m_list.drawn.size()
     int m_selected = -1;   // primitive index, -1 none
