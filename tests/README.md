@@ -495,6 +495,15 @@ shows nothing and answers `<file>` at once, printing `file dialog: <kind> picked
 
     python3 uiinspectorcheck.py <splashedit>
 
+`fieldarrowcheck.py` checks Up and Down in a number field being typed into (#158), on the same
+copy of `ui/ui.scene` with `--ui`: Up and Down step the typed value (one for a whole-number field)
+and stay in the field instead of moving the keyboard focus; Tab still moves on to the next field,
+typing into a field Tab reached still replaces its value, and Escape still cancels. It double-clicks
+`@ui.posa`, Tabs and presses keys, saves with Ctrl+S and reads the `title` element's rect. Needs a
+display.
+
+    python3 fieldarrowcheck.py <splashedit>
+
 `uispriteguicheck.py` drives the Image inspector's Sheet row on a project holding `sprite/`'s two
 sheets and a canvas with one plain image: selected on the canvas, its Sheet menu (`ui.sheet`, items
 `ui.sheet/None`, `ui.sheet/<sheet>`) picks `hero`, the cell picker drawn over the sheet's texture

@@ -501,8 +501,29 @@ void textEditNewFrame() {
 
 bool textEditing(const char* id) { return textState().id != 0 && textState().id == ImGui::GetID(id); }
 
+// What textEdit's InputText callback serves: the caller's character filter
+// and, for a number, Up and Down.
+struct TextEditCallbacks {
+    ImGuiInputTextCallback charFilter;
+    float (*upDown)(bool shift);
+};
+static int textEditCallback(ImGuiInputTextCallbackData* d) {
+    const TextEditCallbacks& cb = *static_cast<const TextEditCallbacks*>(d->UserData);
+    if (d->EventFlag == ImGuiInputTextFlags_CallbackCharFilter) return cb.charFilter ? cb.charFilter(d) : 0;
+    if (d->EventFlag == ImGuiInputTextFlags_CallbackHistory && cb.upDown &&
+        (d->EventKey == ImGuiKey_UpArrow || d->EventKey == ImGuiKey_DownArrow)) {
+        std::string t(d->Buf, size_t(d->BufTextLen));
+        if (stepTyped(t, d->EventKey == ImGuiKey_UpArrow ? 1 : -1, cb.upDown(ImGui::GetIO().KeyShift))) {
+            d->DeleteChars(0, d->BufTextLen);
+            d->InsertChars(0, t.c_str());
+            d->SelectAll();
+        }
+    }
+    return 0;
+}
+
 TextEdit textEdit(const char* id, ImRect field, ImFont* font, float size, float textX, float textRight, std::string* out,
-                  size_t maxLen, ImGuiInputTextCallback charFilter) {
+                  size_t maxLen, ImGuiInputTextCallback charFilter, float (*upDown)(bool shift)) {
     TextEditState& s = textState();
     if (s.id == 0 || s.id != ImGui::GetID(id)) return TextEdit::Inactive;
     s.drawn = true;
@@ -532,7 +553,12 @@ TextEdit textEdit(const char* id, ImRect field, ImFont* font, float size, float 
     ImGui::PushID(id);
     ImGuiInputTextFlags flags = ImGuiInputTextFlags_EnterReturnsTrue | ImGuiInputTextFlags_AutoSelectAll;
     if (charFilter) flags |= ImGuiInputTextFlags_CallbackCharFilter;
-    bool enter = ImGui::InputText("##textedit", s.buf, std::min(sizeof s.buf, maxLen + 1), flags, charFilter);
+    // History: InputText takes Up and Down for itself (ImGui's keyboard
+    // navigation would otherwise move the focus to the next item, #158).
+    if (upDown) flags |= ImGuiInputTextFlags_CallbackHistory;
+    TextEditCallbacks cbs{charFilter, upDown};
+    bool enter = ImGui::InputText("##textedit", s.buf, std::min(sizeof s.buf, maxLen + 1), flags,
+                                  charFilter || upDown ? textEditCallback : nullptr, &cbs);
     bool deactivated = ImGui::IsItemDeactivated();
     bool active = ImGui::IsItemActive();
     // Tab and Shift+Tab move to the next or previous field: commit now, so a
@@ -626,7 +652,9 @@ FieldEdit numberField(const char* id, ImRect r, const char* value, const char* u
     // Typing.
     if (edit && textEditing(id)) {
         std::string typed;
-        TextEdit res = textEdit(id, r, f.regular, type::body, x, right, &typed);
+        // Up and Down step what is typed, by keyStep (#158).
+        float (*step)(bool) = integer ? +[](bool) { return keyStep(true, false); } : +[](bool fine) { return keyStep(false, fine); };
+        TextEdit res = textEdit(id, r, f.regular, type::body, x, right, &typed, 255, nullptr, step);
         decorations();
         if (res == TextEdit::Commit) {
             char* end = nullptr;
