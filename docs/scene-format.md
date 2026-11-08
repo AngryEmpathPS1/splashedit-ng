@@ -151,12 +151,15 @@ Two optional top-level arrays after `objects`.
 A font is either `source`, a TTF/OTF rasterised at `size` pixels per em (4..64), or `bitmap`, a PNG
 256 pixels wide of `glyphWidth` x `glyphHeight` cells from 0x20 in ASCII order (ink = alpha above
 0.5). A bitmap font may give `advances`, 96 widths for 0x20..0x7F; without them each character
-advances by its ink width plus one. At most 3 fonts; names must be unique.
+advances by its ink width plus `gap` (0..16, default 1; 0 makes characters touch), or by
+`glyphWidth` when `monospace` is true (default false). Both are ignored when `advances` is given.
+At most 3 fonts; names must be unique.
 
 In the editor, the UI tab's canvas inspector (select a canvas, no element) has a Scene fonts
-section that adds, edits and removes fonts: name, source file, size or glyph cells, with the sheet
-and VRAM each one costs and a sample line. Renaming a font renames it in every text element that
-uses it; deleting one puts those elements back on the system font. Each change is one undo step.
+section that adds, edits and removes fonts: name, source file, size or glyph cells (and, for a
+bitmap font without `advances`, Monospace and Gap), with the sheet and VRAM each one costs and a
+sample line. Renaming a font renames it in every text element that uses it; deleting one puts those
+elements back on the system font. Each change is one undo step.
 
 A canvas's `defaultFont` (a font name, `null` for the system font; Unity's PSXCanvas.defaultFont)
 is the font of its text elements whose own `font` is `null`. The export resolves it: such an

@@ -93,7 +93,7 @@ FramePanel::~FramePanel() {
     // At exit the GL context may already be gone; the driver frees the textures with it.
 }
 
-bool FramePanel::load(const std::filesystem::path& file, std::string* error) {
+bool FramePanel::load(const std::filesystem::path& file, std::string* error, const std::filesystem::path& packs) {
     gpudump::Dump dump;
     std::string err;
     if (!gpudump::load(file, dump, &err)) {
@@ -140,7 +140,36 @@ bool FramePanel::load(const std::filesystem::path& file, std::string* error) {
                      std::to_string(m_areaW) + "x" + std::to_string(m_areaH) + " at " + std::to_string(m_areaX) + "," +
                      std::to_string(m_areaY));
     say(nullptr, "frame: prims " + std::to_string(m_list.drawn.size()));
+    findTagScene(packs.empty() ? file.parent_path() : packs);
+    if (m_list.tagged) say(nullptr, "frame: tagged " + std::to_string(m_list.tagged) + " " + m_tagNote);
     return true;
+}
+
+// The pack among dir/scene_<i>.splashpack the tags fit (gpudump::matchTagScene).
+void FramePanel::findTagScene(const std::filesystem::path& dir) {
+    m_tagScene.reset();
+    m_tagNote.clear();
+    if (!m_list.tagged) return;
+    std::vector<gpudump::TagScene> scenes;
+    std::error_code ec;
+    for (int i = 0;; ++i) {
+        const std::filesystem::path pack = dir / ("scene_" + std::to_string(i) + ".splashpack");
+        if (!std::filesystem::is_regular_file(pack, ec)) break;
+        gpudump::TagScene s;
+        if (gpudump::loadTagScene(pack, s, nullptr)) scenes.push_back(std::move(s));
+    }
+    if (scenes.empty()) {
+        m_tagNote = "no scene_0.splashpack beside the capture: object indices only";
+        return;
+    }
+    const int at = gpudump::matchTagScene(m_list, scenes);
+    if (at < 0) {
+        m_tagNote = scenes.size() == 1 ? "the tags do not fit " + utf8(scenes[0].pack.filename()) + ": object indices only"
+                                       : "no single scene pack fits the tags: object indices only";
+        return;
+    }
+    m_tagScene = std::make_unique<gpudump::TagScene>(std::move(scenes[size_t(at)]));
+    m_tagNote = "names from " + utf8(m_tagScene->pack.filename());
 }
 
 ImRect FramePanel::dock(ImRect area) {
@@ -209,7 +238,14 @@ void FramePanel::pick(int x, int y) {
             what = "setup";
         } else {
             select(prim, true);
-            what = "#" + std::to_string(prim) + " " + gpudump::typeName(m_list.commands[size_t(owner)]);
+            const gpudump::Command& c = m_list.commands[size_t(owner)];
+            what = "#" + std::to_string(prim) + " " + gpudump::typeName(c);
+            if (c.tag.present) {
+                const bool named = m_tagScene && c.tag.obj < m_tagScene->objects.size();
+                what += " obj " + (named ? m_tagScene->objects[c.tag.obj].name : "#" + std::to_string(c.tag.obj)) + " tri " +
+                        std::to_string(c.tag.tri) + " slot " + std::to_string(c.tag.slot);
+                if (c.tag.kind == gpudump::kTagFog) what += " fog";
+            }
         }
     }
     say(nullptr, "frame: pick " + std::to_string(x) + "," + std::to_string(y) + " -> " + what);
@@ -316,6 +352,7 @@ void FramePanel::header(ImDrawList* dl, ImRect r) {
         std::string info = utf8(m_file.filename()) + "   " + std::to_string(m_list.drawn.size()) + " primitives   " +
                            std::to_string(m_list.commands.size()) + " commands";
         if (m_list.frames > 1) info += "   " + std::to_string(m_list.frames) + " vsyncs";
+        if (m_list.tagged) info += "   " + std::to_string(m_list.tagged) + " tagged (" + m_tagNote + ")";
         if (m_list.incomplete || m_dump.truncated) info += "   (cut short)";
         text(dl, ImVec2(x, cy - 8), f.medium, type::label, color::textDim, info.c_str());
     }
@@ -476,6 +513,18 @@ void FramePanel::details(ImDrawList* dl, ImRect r) {
         std::snprintf(b, sizeof b, "#%d, %zu words (file words %u..%u)", m_list.drawn[size_t(m_selected)], c->words.size(), c->firstWord,
                       c->lastWord);
         row("Command", b, color::textDim);
+        if (c->tag.present) {
+            // psxsplash's capture tag: the scene object and triangle that drew it.
+            const gpudump::PrimTag& t = c->tag;
+            std::string obj;
+            if (t.obj == gpudump::kTagNoObject) obj = "? (index past 4094)";
+            else if (m_tagScene && t.obj < m_tagScene->objects.size()) obj = m_tagScene->objects[t.obj].name + "  (#" + std::to_string(t.obj) + ")";
+            else obj = "#" + std::to_string(t.obj) + "  (no scene pack names it)";
+            row("Object", obj, rgb(0x7fc8ff));
+            std::snprintf(b, sizeof b, "triangle %u, OT slot %s%s", unsigned(t.tri),
+                          t.slot == gpudump::kTagNoSlot ? "?" : std::to_string(t.slot).c_str(), t.kind == gpudump::kTagFog ? ", fog pass" : "");
+            row("Source", b);
+        }
         const gpudump::GpuState& st = c->state;
         row("Blend", c->semiTransparent() ? std::string(blendName(st.blendMode())) + " (mode " + std::to_string(st.blendMode()) + ")"
                                           : std::string("opaque"));

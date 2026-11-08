@@ -17,6 +17,7 @@
 #include "editor/tv_preview.hh"
 #include "ui/colour_hex.hh"
 #include "ui/icons.h"
+#include "ui/popup_place.hh"
 #include "ui/scrub.hh"
 
 using namespace theme;
@@ -500,8 +501,29 @@ void textEditNewFrame() {
 
 bool textEditing(const char* id) { return textState().id != 0 && textState().id == ImGui::GetID(id); }
 
+// What textEdit's InputText callback serves: the caller's character filter
+// and, for a number, Up and Down.
+struct TextEditCallbacks {
+    ImGuiInputTextCallback charFilter;
+    float (*upDown)(bool shift);
+};
+static int textEditCallback(ImGuiInputTextCallbackData* d) {
+    const TextEditCallbacks& cb = *static_cast<const TextEditCallbacks*>(d->UserData);
+    if (d->EventFlag == ImGuiInputTextFlags_CallbackCharFilter) return cb.charFilter ? cb.charFilter(d) : 0;
+    if (d->EventFlag == ImGuiInputTextFlags_CallbackHistory && cb.upDown &&
+        (d->EventKey == ImGuiKey_UpArrow || d->EventKey == ImGuiKey_DownArrow)) {
+        std::string t(d->Buf, size_t(d->BufTextLen));
+        if (stepTyped(t, d->EventKey == ImGuiKey_UpArrow ? 1 : -1, cb.upDown(ImGui::GetIO().KeyShift))) {
+            d->DeleteChars(0, d->BufTextLen);
+            d->InsertChars(0, t.c_str());
+            d->SelectAll();
+        }
+    }
+    return 0;
+}
+
 TextEdit textEdit(const char* id, ImRect field, ImFont* font, float size, float textX, float textRight, std::string* out,
-                  size_t maxLen, ImGuiInputTextCallback charFilter) {
+                  size_t maxLen, ImGuiInputTextCallback charFilter, float (*upDown)(bool shift)) {
     TextEditState& s = textState();
     if (s.id == 0 || s.id != ImGui::GetID(id)) return TextEdit::Inactive;
     s.drawn = true;
@@ -531,7 +553,12 @@ TextEdit textEdit(const char* id, ImRect field, ImFont* font, float size, float 
     ImGui::PushID(id);
     ImGuiInputTextFlags flags = ImGuiInputTextFlags_EnterReturnsTrue | ImGuiInputTextFlags_AutoSelectAll;
     if (charFilter) flags |= ImGuiInputTextFlags_CallbackCharFilter;
-    bool enter = ImGui::InputText("##textedit", s.buf, std::min(sizeof s.buf, maxLen + 1), flags, charFilter);
+    // History: InputText takes Up and Down for itself (ImGui's keyboard
+    // navigation would otherwise move the focus to the next item, #158).
+    if (upDown) flags |= ImGuiInputTextFlags_CallbackHistory;
+    TextEditCallbacks cbs{charFilter, upDown};
+    bool enter = ImGui::InputText("##textedit", s.buf, std::min(sizeof s.buf, maxLen + 1), flags,
+                                  charFilter || upDown ? textEditCallback : nullptr, &cbs);
     bool deactivated = ImGui::IsItemDeactivated();
     bool active = ImGui::IsItemActive();
     // Tab and Shift+Tab move to the next or previous field: commit now, so a
@@ -625,7 +652,9 @@ FieldEdit numberField(const char* id, ImRect r, const char* value, const char* u
     // Typing.
     if (edit && textEditing(id)) {
         std::string typed;
-        TextEdit res = textEdit(id, r, f.regular, type::body, x, right, &typed);
+        // Up and Down step what is typed, by keyStep (#158).
+        float (*step)(bool) = integer ? +[](bool) { return keyStep(true, false); } : +[](bool fine) { return keyStep(false, fine); };
+        TextEdit res = textEdit(id, r, f.regular, type::body, x, right, &typed, 255, nullptr, step);
         decorations();
         if (res == TextEdit::Commit) {
             char* end = nullptr;
@@ -944,7 +973,53 @@ int picker(const char* id, ImVec2 pos, float width, const char* placeholder, std
     return picked;
 }
 
-bool assetField(const char* id, ImRect r, const char* ic, ImU32 iconColor, const char* name, const char* meta) {
+AssetAction assetMenu(const char* id, ImRect r, bool hovered, const char* menuName, bool hasFile, bool clearable) {
+    // One menu is open at a time, so where it opened is shared.
+    static ImVec2 menuPos;
+    AssetAction out = AssetAction::None;
+    ImGui::PushID(id);
+    const char* popup = "##assetmenu";
+    if (hovered && ImGui::IsMouseClicked(ImGuiMouseButton_Right)) {
+        // Under the field, from the pointer across, so the field stays in view.
+        menuPos = ImVec2(ImGui::GetIO().MousePos.x, r.Max.y + space::xs);
+        ImGui::OpenPopup(popup);
+    }
+    if (ImGui::IsPopupOpen(popup)) {
+        std::vector<MenuItem> items;
+        items.push_back({"Browse...", "", true, [&out] { out = AssetAction::Browse; }});
+        items.push_back({"Show in Project", "", hasFile, [&out] { out = AssetAction::ShowInProject; }});
+        items.push_back({"Show in file explorer", "", hasFile, [&out] { out = AssetAction::ShowInExplorer; }});
+        items.push_back({"", "", true, {}});
+        items.push_back({"Clear", "", hasFile && clearable, [&out] { out = AssetAction::Clear; }});
+        float w, mh;
+        menuSize(items, &w, &mh);
+        const ImVec2 d = ImGui::GetIO().DisplaySize;
+        ImVec2 pos = menuPos;
+        if (pos.x + w > d.x - space::xs) pos.x -= w;
+        if (pos.y + mh > d.y - space::xs) pos.y = r.Min.y - space::xs - mh;  // no room below: above it
+        pos.x = std::max(pos.x, space::xs);
+        pos.y = std::max(pos.y, space::xs);
+        ImGui::SetNextWindowPos(pos);
+        ImGui::SetNextWindowSize(ImVec2(w, mh));
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
+        ImGui::PushStyleVar(ImGuiStyleVar_PopupBorderSize, 0.0f);
+        const bool shown = ImGui::BeginPopup(popup, ImGuiWindowFlags_NoBackground | ImGuiWindowFlags_NoDecoration |
+                                                        ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoSavedSettings);
+        ImGui::PopStyleVar(2);
+        if (shown) {
+            const std::string name = std::string(menuName ? menuName : id) + ".menu";
+            std::function<void()> run = menuRows(items, w, mh, name.c_str());
+            if (run || ImGui::IsKeyPressed(ImGuiKey_Escape, false)) ImGui::CloseCurrentPopup();
+            ImGui::EndPopup();
+            if (run) run();
+        }
+    }
+    ImGui::PopID();
+    return out;
+}
+
+AssetAction assetField(const char* id, ImRect r, const char* ic, ImU32 iconColor, const char* name, const char* meta,
+                       const char* menuName, bool hasFile, bool clearable) {
     Fonts& f = fonts();
     Hit h = interact(id, r);
     ImDrawList* dl = ImGui::GetWindowDrawList();
@@ -959,7 +1034,8 @@ bool assetField(const char* id, ImRect r, const char* ic, ImU32 iconColor, const
         text(dl, ImVec2(r.Max.x - space::sm - s.x, centerY(f.regular, type::caption, r.Min.y, r.Max.y)), f.regular, type::caption,
              color::textFaint, meta);
     }
-    return h.clicked;
+    const AssetAction menu = menuName ? assetMenu(id, r, h.hovered, menuName, hasFile, clearable) : AssetAction::None;
+    return h.clicked ? AssetAction::Clicked : menu;
 }
 
 // `mixed` (several objects that differ): the knob sits in the middle of a
@@ -984,6 +1060,21 @@ bool toggle(const char* id, ImRect r, bool on, bool mixed) {
     Hit h = interact(id, r);
     drawToggle(ImGui::GetWindowDrawList(), id, r, on, h.hover, mixed);
     return h.clicked;
+}
+
+void placePopupBelow(const char* popupId, ImRect field, ImVec2 pivot) {
+    // BeginPopup's window is "##Popup_<id>"; its size is known from the frame before. The first time it
+    // opens ImGui sizes it on a hidden frame (and ignores the position there), so the guess (about a
+    // 220 px colour picker) only stands in until then.
+    char name[32];
+    ImFormatString(name, IM_COUNTOF(name), "##Popup_%08x", ImGui::GetID(popupId));
+    const ImGuiWindow* w = ImGui::FindWindowByName(name);
+    const ImVec2 sz = w && w->Size.x > 0 && w->Size.y > 0 ? w->Size : ImVec2(240, 300);
+    const ImGuiViewport* vp = ImGui::GetMainViewport();
+    const PopupPos p = popupBelow({field.Min.x, field.Min.y, field.Max.x, field.Max.y}, sz.x, sz.y,
+                                  {vp->WorkPos.x, vp->WorkPos.y, vp->WorkPos.x + vp->WorkSize.x, vp->WorkPos.y + vp->WorkSize.y},
+                                  pivot.x, space::xs, space::xs);
+    ImGui::SetNextWindowPos(ImVec2(p.x, p.y), ImGuiCond_Always);
 }
 
 ColorFieldHit colorField(const char* id, ImRect r, const std::array<float, 3>& value, const char* name, bool mixed) {

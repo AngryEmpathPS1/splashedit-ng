@@ -141,8 +141,8 @@ sw, sh, sbpp, srows = readpng(os.path.join(here, 'sprite', 'hero.png'))
 bad, opaque = 0, 0
 for y in range(16):
     for x in range(16):
-        # The preview samples u = x * 15 / 16 across a 16 px rect, as the export's UVs land.
-        u, v = 32 + x * 15 // 16, 16 + y * 15 // 16
+        # A 16x16 cell at 16x16 is 1:1: the engine draws it as a sprite, one texel per pixel.
+        u, v = 32 + x, 16 + y
         if srows[v][u * sbpp + 3] < 128: continue
         opaque += 1
         sx, sy = int(X1 + (IMG[0] + x + 0.5) * S1), int(Y1 + (IMG[1] + y + 0.5) * S1)

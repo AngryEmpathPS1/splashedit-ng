@@ -157,6 +157,7 @@ public:
     }
 
     void gp1(uint32_t word, uint32_t at) {
+        flushTag();
         const uint32_t cmd = (word >> 24) & 0x3f;
         if (cmd == 0x00) {  // reset: state cleared, command buffer dropped
             m_words.clear();
@@ -183,6 +184,7 @@ public:
     }
 
     void vsync(uint32_t at) {
+        flushTag();
         Command c;
         c.kind = Kind::VSync;
         c.firstWord = c.lastWord = at;
@@ -192,6 +194,17 @@ public:
 
     void setLive() { m_live = true; }
     bool pending() const { return !m_words.empty(); }
+    // A capture tag's word 1 with no word 2 after it: kept as the NOP it is.
+    void flushTag() {
+        if (!m_tagPending) return;
+        m_tagPending = false;
+        Command c;
+        c.kind = Kind::Nop;
+        c.op = m_tagWord1;
+        c.words = {m_tagWord1};
+        c.firstWord = c.lastWord = m_tagAt;
+        push(std::move(c));
+    }
     int frames() const { return m_frame; }
 
 private:
@@ -235,6 +248,28 @@ private:
     }
 
     void emit() {
+        // Capture tags (PrimTag): word 1 right after an untagged polygon, then
+        // word 2, both GP0(00h), belong to that polygon. Anything else breaks
+        // the pair and word 1 stays a plain NOP.
+        if ((m_words[0] >> 24) == 0x00) {
+            const uint32_t w = m_words[0];
+            if (m_tagPending) {
+                m_tagPending = false;
+                m_out.commands.back().tag = tagOf(m_tagWord1, w);
+                ++m_out.tagged;
+                m_words.clear();
+                return;
+            }
+            if (isTagWord1(w) && !m_out.commands.empty() && m_out.commands.back().kind == Kind::Polygon &&
+                !m_out.commands.back().tag.present) {
+                m_tagPending = true;
+                m_tagWord1 = w;
+                m_tagAt = m_first;
+                m_words.clear();
+                return;
+            }
+        }
+        flushTag();
         Command c;
         c.op = m_words[0];
         c.words = std::move(m_words);
@@ -400,6 +435,8 @@ private:
     uint32_t m_first = 0, m_last = 0;
     bool m_live = false;
     int m_frame = 0;
+    bool m_tagPending = false;  // a tag's word 1 came last, waiting for word 2
+    uint32_t m_tagWord1 = 0, m_tagAt = 0;
 };
 
 }  // namespace
@@ -420,9 +457,124 @@ CommandList decode(const Dump& dump) {
             default: break;
         }
     }
+    d.flushTag();
     out.frames = d.frames();
     out.incomplete = d.pending();
     return out;
+}
+
+}  // namespace gpudump
+
+namespace gpudump {
+
+static uint32_t rd16(const std::vector<uint8_t>& b, size_t at) { return uint32_t(b[at]) | uint32_t(b[at + 1]) << 8; }
+static uint32_t rd32(const std::vector<uint8_t>& b, size_t at) { return rd16(b, at) | rd16(b, at + 2) << 16; }
+
+bool parseTagScene(const std::vector<uint8_t>& b, TagScene& out, std::string* error) {
+    out.objects.clear();
+    auto bad = [&](const char* why) {
+        if (error) *error = why;
+        out.objects.clear();
+        return false;
+    };
+    if (b.size() < 64 || b[0] != 'S' || b[1] != 'P') return bad("not a splashpack");
+    const uint32_t version = rd16(b, 2), luaFiles = rd16(b, 4), objects = rd16(b, 6);
+    // The exporter writes v27/v28 (core/splashpack.cpp, header). A newer version may
+    // grow the header, so it is refused rather than misread: bump this with it.
+    if (version > 28) return bad("splashpack version newer than this reader");
+    // splashpackHeaderSize (docs/splashpack-format.md, header).
+    const size_t header = version >= 28 ? 160 : version >= 25 ? 156 : version >= 24 ? 148 : version >= 22 ? 144 : version >= 21 ? 128 : 120;
+    const size_t table = header + 8 * size_t(luaFiles);
+    constexpr size_t kObject = 92, kTri = 52;
+    if (table + kObject * objects > b.size()) return bad("splashpack object table runs past the end");
+    size_t names = rd32(b, 60);
+    out.objects.resize(objects);
+    for (uint32_t i = 0; i < objects; ++i) {
+        TagScene::Object& o = out.objects[i];
+        const size_t at = table + kObject * i;
+        const uint32_t tris = rd32(b, at);
+        o.triangles = uint16_t(rd16(b, at + 52));
+        o.streamed = tris == 0;
+        if (o.streamed) o.triangles = 0;
+        if (tris + kTri * size_t(o.triangles) > b.size()) return bad("splashpack triangles run past the end");
+        o.looks.resize(o.triangles);
+        for (uint32_t t = 0; t < o.triangles; ++t) {
+            const size_t q = tris + kTri * t;
+            const uint32_t tpage = rd16(b, q + 44), clutX = rd16(b, q + 46), clutY = rd16(b, q + 48);
+            o.looks[t] = ((clutY << 6 | clutX) & 0xffff) << 16 | (tpage & 0x19f);
+        }
+        if (names && names < b.size()) {
+            const size_t len = b[names];
+            if (names + 1 + len < b.size()) o.name.assign(reinterpret_cast<const char*>(b.data() + names + 1), len);
+            names += len + 2;
+        }
+    }
+    return true;
+}
+
+bool loadTagScene(const std::filesystem::path& pack, TagScene& out, std::string* error) {
+    std::ifstream in(pack, std::ios::binary);
+    if (!in) {
+        if (error) *error = "cannot open the splashpack";
+        return false;
+    }
+    std::vector<uint8_t> bytes((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    out.pack = pack;
+    return parseTagScene(bytes, out, error);
+}
+
+int matchTagScene(const CommandList& list, const std::vector<TagScene>& scenes) {
+    int best = -1;
+    long bestScore = 0;
+    bool tie = false;
+    for (size_t s = 0; s < scenes.size(); ++s) {
+        const TagScene& sc = scenes[s];
+        bool fits = true;
+        long score = 0;
+        for (const Command& c : list.commands) {
+            if (!c.tag.present) continue;
+            const PrimTag& t = c.tag;
+            if (t.obj == kTagNoObject) continue;
+            if (t.obj >= sc.objects.size()) {
+                fits = false;
+                break;
+            }
+            const TagScene::Object& o = sc.objects[t.obj];
+            if (o.streamed) continue;
+            if (t.tri >= o.triangles) {
+                fits = false;
+                break;
+            }
+            if (t.kind != kTagMain || !c.textured()) continue;
+            const uint32_t look = uint32_t(c.clut) << 16 | (c.state.texpage & 0x19f);
+            score += look == o.looks[t.tri] ? 1 : -1;
+        }
+        if (!fits) continue;
+        if (best < 0 || score > bestScore) {
+            best = int(s);
+            bestScore = score;
+            tie = false;
+        } else if (score == bestScore) {
+            tie = true;
+        }
+    }
+    return tie ? -1 : best;
+}
+
+std::string tagText(const PrimTag& tag, const TagScene* scene) {
+    if (!tag.present) return {};
+    std::string s = "object ";
+    if (tag.obj == kTagNoObject) {
+        s += "? (index past 4094)";
+    } else {
+        if (scene && tag.obj < scene->objects.size()) s += scene->objects[tag.obj].name + " ";
+        s += "(#" + std::to_string(tag.obj) + ")";
+    }
+    s += ", triangle " + std::to_string(tag.tri) + ", OT slot ";
+    s += tag.slot == kTagNoSlot ? std::string("?") : std::to_string(tag.slot);
+    if (tag.kind == kTagFog) s += ", fog pass";
+    else if (tag.kind != kTagMain) s += ", kind " + std::to_string(tag.kind);
+    return s;
 }
 
 }  // namespace gpudump

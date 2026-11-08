@@ -232,10 +232,11 @@ std::string engineLoaderNote(const fs::path& exe, bool disc) {
     if (pcdrv == cdrom) return {};
     if (!disc && cdrom)
         return utf8(exe.filename()) + " is the CD-ROM build of psxsplash (LOADER=cdrom). Play and Run on hardware "
-               "load the scene over PCdrv, so it stops on the boot logo: use a build made without LOADER=cdrom.";
+               "load the scene over PCdrv, so it stops on the boot logo: use psxsplash.ps-exe from running xmake in "
+               "psxsplash (or a make build without LOADER=cdrom).";
     if (disc && pcdrv)
-        return utf8(exe.filename()) + " is the PCdrv build of psxsplash. A disc image needs the CD-ROM build "
-               "(make LOADER=cdrom), or it stops on the boot logo.";
+        return utf8(exe.filename()) + " is the PCdrv build of psxsplash. A disc image needs the CD-ROM build, "
+               "psxsplash-cdrom.ps-exe from running xmake in psxsplash (or make LOADER=cdrom), or it stops on the boot logo.";
     return {};
 }
 
@@ -262,8 +263,9 @@ std::vector<std::string> missingTools(const PlayTools& t) {
         need(engineFor(t), engineWhat(t).c_str());
         // A psxsplash built by hand: the overlay build is a separate file beside it.
         if (out.size() > before && (t.overlayPerf || t.overlayRooms))
-            out.back() += std::string(". Build psxsplash with") + (t.overlayPerf ? " FPSOVERLAY=1 MEMOVERLAY=1" : "") +
-                          (t.overlayRooms ? " ROOMDEBUG=1" : "") + " and save it under that name, or turn the overlay off in the Build menu.";
+            out.back() += std::string(". Running xmake in psxsplash builds it under that name (with make: build with") +
+                          (t.overlayPerf ? " FPSOVERLAY=1 MEMOVERLAY=1" : "") + (t.overlayRooms ? " ROOMDEBUG=1" : "") +
+                          " and save it under that name), or turn the overlay off in the Build menu.";
     }
     if (!t.bios.empty() && !fs::is_regular_file(t.bios, ec)) out.push_back("BIOS not found: " + utf8(t.bios));
     return out;

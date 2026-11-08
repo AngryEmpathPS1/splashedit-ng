@@ -159,7 +159,10 @@ std::string addInteractCallback(const std::string& text, bool blocks);
 
 // The objects an imported model becomes, the top one named `name`. A model of
 // one node, or any model with `settings.mergeMeshes`, is one object drawing
-// the baked mesh. Otherwise the top object is an empty holding an object per
+// the baked mesh; but when that node's mesh is not skinned and the node is
+// moved, turned or scaled, and meshes are not merged, the object draws the
+// node's own mesh with the node's transform, so its pivot is the node's.
+// Otherwise the top object is an empty holding an object per
 // node, the file's tree kept: each with the node's local transform and, if it
 // has one, its mesh and materials. Every mesh component gets the settings'
 // bit depth and lighting. An object drawing a skinned mesh also gets a skin
@@ -203,7 +206,10 @@ std::filesystem::path modelOfMesh(const std::filesystem::path& project, const st
 // (matched by name) take the new node transforms. When `wasMerged` is given
 // and differs from the sidecar's mergeMeshes, the top object of each instance
 // is rebuilt the other way: the node objects swapped for the baked mesh or
-// back, the rest of the object kept. The scene changes are one undo step.
+// back, the rest of the object kept. An object of a one-node model swaps its
+// mesh instead, its transform changed so that nothing moves (left as it is
+// when no transform does that). Otherwise transforms of objects drawing a
+// mesh of a one-node model are never changed. The scene changes are one undo step.
 // `converted`, when given, is read instead of modelSource() (as for placeModel).
 struct Reimported {
     std::string error;  // empty on success

@@ -34,6 +34,7 @@
 
 #include "editor/asset_browser.hh"
 #include "editor/blocks_edit.hh"
+#include "editor/asset_fields.hh"
 #include "editor/catalog.hh"
 #include "editor/document.hh"
 #include "editor/hardware.hh"
@@ -60,6 +61,7 @@
 #include "editor/timeline.hh"
 #include "editor/tv_preview.hh"
 #include "editor/unirom.hh"
+#include "editor/vertex_ao.hh"
 #include "editor/vertex_paint.hh"
 #include "audio.hh"
 #include "blend.hh"
@@ -69,15 +71,18 @@
 #include "path.hh"
 #include "strings.hh"
 #include "simplify.hh"
+#include "editor/pivot.hh"
 #include "editor/ui_canvas.hh"
 #include "ui/dialog_gate.hh"
 #include "ui/window_chrome.hh"
 #include "ui/ui_scale.hh"
 #include "ui/list_scroll.hh"
+#include "ui/popup_place.hh"
 #include "ui/scrub.hh"
 #include "ui/colour_hex.hh"
 #include "budget.hh"
 #include "disc.hh"
+#include "player.hh"
 #include "licencesim.hh"
 #include "licencetmd.hh"
 #include "font.hh"
@@ -91,6 +96,8 @@
 #include "worldstream.hh"
 #include "gpu_raster.hh"
 #include "gpudump.hh"
+
+#include <nlohmann/json.hpp>
 
 namespace {
 
@@ -616,6 +623,106 @@ void testComponentFieldsSaveUndo() {
     // The reloaded scene keeps undoing nothing; the edited one undoes all the way back.
     for (size_t i = 0; i < steps.size(); i++) CHECK(d.undo());
     for (const Step& st : steps) CHECK(st.isOld(*d.object(editor::ObjectPath{st.at})));
+}
+
+// The inspector's file fields' Clear (#323): each sets its field back to
+// None as one undo step, which undo takes back and redo does again; a field
+// that is None already takes no step, nor do a Model and a skin's Clips.
+void testClearAssetField() {
+    using F = editor::AssetField;
+    splash::Scene sc;
+    splash::Object a = named("A");
+    a.mesh.emplace();
+    a.mesh->mesh = "meshes/crate.mesh";
+    a.mesh->materials.resize(2);
+    a.mesh->materials[0].texture = "textures/crate.png";
+    a.mesh->materials[1].texture = "textures/lid.png";
+    a.script.emplace().lua = "scripts/a.lua";
+    a.trigger.emplace().lua = "scripts/a_trigger.lua";
+    a.audio.emplace().clip = "audio/hit.wav";
+    a.audio->clipName = "hit";
+    a.skin.emplace().clips = {"anims/walk.anim", "anims/run.anim"};
+    sc.objects.push_back(a);
+    splash::Object b = named("B");
+    b.script.emplace().lua = "scripts/b.lua";
+    sc.objects.push_back(b);
+    sc.objects.push_back(named("C"));
+    sc.settings.script = "scripts/scene.lua";
+    sc.settings.memCard.icons = {"textures/i0.png", "textures/i1.png", "textures/i2.png"};
+
+    editor::Document d;
+    d.reset(sc);
+    // The file each field shows.
+    CHECK(editor::assetFieldFile(d, F::Model, {0}) == "meshes/crate.mesh");
+    CHECK(editor::assetFieldFile(d, F::Texture, {0}, -1) == "textures/crate.png");
+    CHECK(editor::assetFieldFile(d, F::Texture, {0}, 1) == "textures/lid.png");
+    CHECK(editor::assetFieldFile(d, F::Texture, {0}, 2).empty());
+    CHECK(editor::assetFieldFile(d, F::SkinClips, {0}) == "anims/walk.anim");
+    CHECK(editor::assetFieldFile(d, F::MemCardIcon, {}, 1) == "textures/i1.png");
+    CHECK(editor::assetFieldFile(d, F::Lua, {2}).empty());
+
+    // Clear `f`, then undo and redo: `get` reads the field.
+    auto cycle = [&](F f, const editor::ObjectPath& p, int index, const std::function<std::string()>& get, const std::string& was) {
+        const size_t steps = d.historySize();
+        CHECK(get() == was);
+        CHECK(editor::clearAssetField(d, f, p, index));
+        CHECK(get().empty());
+        CHECK(d.historySize() == steps + 1);
+        CHECK(d.dirty());
+        CHECK(d.undo());
+        CHECK(get() == was);
+        CHECK(d.redo());
+        CHECK(get().empty());
+        // Already None: no step.
+        CHECK(!editor::clearAssetField(d, f, p, index));
+        CHECK(d.historySize() == steps + 1);
+    };
+    auto obj = [&]() -> const splash::Object& { return *d.object({0}); };
+    // A mesh without a model and a skin without clips stop the export: no Clear.
+    CHECK(!editor::assetFieldClearable(F::Model) && !editor::assetFieldClearable(F::SkinClips));
+    CHECK(editor::assetFieldClearable(F::Texture) && editor::assetFieldClearable(F::MemCardIcon));
+    CHECK(!editor::clearAssetField(d, F::Model, {0}));
+    CHECK(!editor::clearAssetField(d, F::SkinClips, {0}));
+    CHECK(obj().mesh->mesh == "meshes/crate.mesh" && obj().skin->clips.size() == 2);
+    CHECK(d.historySize() == 0 && !d.dirty());
+    cycle(F::Texture, {0}, 1, [&] { return obj().mesh->materials[1].texture; }, "textures/lid.png");
+    CHECK(obj().mesh->materials[0].texture == "textures/crate.png");  // only that material's
+    CHECK(obj().mesh->materials.size() == 2);
+    cycle(F::Texture, {0}, -1, [&] { return obj().mesh->materials[0].texture; }, "textures/crate.png");
+    cycle(F::Lua, {0}, -1, [&] { return obj().script->lua; }, "scripts/a.lua");
+    CHECK(obj().script.has_value());  // the component stays
+    cycle(F::TriggerLua, {0}, -1, [&] { return obj().trigger->lua; }, "scripts/a_trigger.lua");
+    cycle(F::Clip, {0}, -1, [&] { return obj().audio->clip; }, "audio/hit.wav");
+    CHECK(obj().audio->clipName == "hit");
+    cycle(F::SceneLua, {}, -1, [&] { return d.scene().settings.script; }, "scripts/scene.lua");
+    // An icon frame without an image cannot export: Clear takes the frame out.
+    {
+        const size_t steps = d.historySize();
+        CHECK(editor::clearAssetField(d, F::MemCardIcon, {}, 1));
+        CHECK((d.scene().settings.memCard.icons == std::vector<std::string>{"textures/i0.png", "textures/i2.png"}));
+        CHECK(d.historySize() == steps + 1);
+        CHECK(d.undo());
+        CHECK(d.scene().settings.memCard.icons.size() == 3 && d.scene().settings.memCard.icons[1] == "textures/i1.png");
+        CHECK(d.redo());
+        CHECK(d.scene().settings.memCard.icons.size() == 2);
+        CHECK(!editor::clearAssetField(d, F::MemCardIcon, {}, 5));
+    }
+    // The multi-object inspector: every selected object's script, one step;
+    // the one without a file is left as it is.
+    {
+        const size_t steps = d.historySize();
+        d.edit({0}, [](splash::Object& o) { o.script->lua = "scripts/a.lua"; });
+        d.endMerge();
+        CHECK(editor::clearAssetField(d, F::Lua, {1}, -1, {{0}, {1}, {2}}));
+        CHECK(d.object({0})->script->lua.empty() && d.object({1})->script->lua.empty());
+        CHECK(!d.object({2})->script);
+        CHECK(d.historySize() == steps + 2);
+        CHECK(d.undo());
+        CHECK(d.object({0})->script->lua == "scripts/a.lua" && d.object({1})->script->lua == "scripts/b.lua");
+    }
+    // No such object or component: nothing.
+    CHECK(!editor::clearAssetField(d, F::Clip, {2}));
+    CHECK(!editor::clearAssetField(d, F::Model, {9}));
 }
 
 void testStructure() {
@@ -2445,8 +2552,9 @@ void testEngineLoaderNote() {
     CHECK(editor::engineLoaderNote(cdrom, true).empty());
     const std::string play = editor::engineLoaderNote(cdrom, false);
     CHECK(play.find("cdrom.ps-exe is the CD-ROM build") == 0);
-    CHECK(play.find("boot logo") != std::string::npos);
-    CHECK(editor::engineLoaderNote(pcdrv, true).find("pcdrv.ps-exe is the PCdrv build") == 0);
+    CHECK(play.find("boot logo") != std::string::npos && play.find("psxsplash.ps-exe from running xmake") != std::string::npos);
+    CHECK(editor::engineLoaderNote(pcdrv, true).find("pcdrv.ps-exe is the PCdrv build") == 0 &&
+          editor::engineLoaderNote(pcdrv, true).find("psxsplash-cdrom.ps-exe from running xmake") != std::string::npos);
     CHECK(editor::engineLoaderNote(neither, false).empty());
     CHECK(editor::engineLoaderNote(neither, true).empty());
     CHECK(editor::engineLoaderNote(dir / "missing.ps-exe", false).empty());
@@ -2520,7 +2628,8 @@ void testPlayOverlays() {
     CHECK(miss.size() == 1 && miss[0].find("room debug overlay") != std::string::npos &&
           miss[0].find("psxsplash-rooms.ps-exe") != std::string::npos);
     // It says how to make one, naming only the flag that overlay needs.
-    CHECK(miss.size() == 1 && miss[0].find("with ROOMDEBUG=1 and save it under that name") != std::string::npos &&
+    CHECK(miss.size() == 1 && miss[0].find("Running xmake in psxsplash builds it under that name") != std::string::npos &&
+          miss[0].find("with ROOMDEBUG=1 and save it under that name") != std::string::npos &&
           miss[0].find("FPSOVERLAY") == std::string::npos);
     CHECK(hwMiss.size() == 1 && hwMiss[0].find("psxsplash-rooms.ps-exe") != std::string::npos);
     CHECK(editor::missingDiscTools(eff).empty());
@@ -4075,6 +4184,749 @@ void testPlaceModel() {
     size_t before = doc.historySize();
     p = editor::placeModel(doc, outside / "junk.glb", std::nullopt, {3}, {0, 0, 0});
     CHECK(!p.error.empty() && doc.historySize() == before && !fs::exists(proj / "models" / "junk.glb"));
+}
+
+// #311 half 2: Set pivot. A new origin for the mesh an object draws moves
+// nothing: not the object, not another copy of the model, not a child; undo
+// and redo swap the files and the transforms together, importing again keeps
+// it, Merge meshes swapping the mesh keeps it, and a mesh it cannot keep (no
+// sidecar, skinned) or a zero move is refused with nothing written.
+void testSetPivot() {
+    namespace fs = std::filesystem;
+    std::error_code ec;
+    fs::path dir = g_outDir / "setpivot";
+    fs::remove_all(dir, ec);
+    fs::path proj = dir / "game", outside = dir / "downloads";
+    fs::create_directories(proj, ec);
+    fs::create_directories(outside, ec);
+    // Cube: moved 5 along X and 1 up, turned 90 degrees about Y, scaled 2
+    // along X, drawing the triangle (0,0,0) (1,0,0) (0,1,0).
+    std::ofstream(outside / "cube.gltf") << R"({"asset":{"version":"2.0"},"scene":0,"scenes":[{"nodes":[0]}],
+"nodes":[{"name":"Cube","mesh":0,"translation":[5,1,0],"rotation":[0,0.70710678,0,0.70710678],"scale":[2,1,1]}],
+"meshes":[{"primitives":[{"attributes":{"POSITION":0}}]}],
+"accessors":[{"bufferView":0,"componentType":5126,"count":3,"type":"VEC3","min":[0,0,0],"max":[1,1,0]}],
+"bufferViews":[{"buffer":0,"byteLength":36}],
+"buffers":[{"byteLength":36,"uri":"data:application/octet-stream;base64,AAAAAAAAAAAAAAAAAACAPwAAAAAAAAAAAAAAAAAAgD8AAAAA"}]})";
+    // Robot: Body (moved, turned about Z, scaled 1 x 2 x 1) holding Arm
+    // (moved, turned about Y), each drawing the same triangle.
+    std::ofstream(outside / "robot.gltf") << R"({"asset":{"version":"2.0"},"scene":0,"scenes":[{"nodes":[0]}],
+"nodes":[{"name":"Body","mesh":0,"translation":[1,0,0],"rotation":[0,0,0.38268343,0.92387953],"scale":[1,2,1],"children":[1]},
+ {"name":"Arm","mesh":0,"translation":[0.5,1,2],"rotation":[0,0.70710678,0,0.70710678]}],
+"meshes":[{"primitives":[{"attributes":{"POSITION":0}}]}],
+"accessors":[{"bufferView":0,"componentType":5126,"count":3,"type":"VEC3","min":[0,0,0],"max":[1,1,0]}],
+"bufferViews":[{"buffer":0,"byteLength":36}],
+"buffers":[{"byteLength":36,"uri":"data:application/octet-stream;base64,AAAAAAAAAAAAAAAAAACAPwAAAAAAAAAAAAAAAAAAgD8AAAAA"}]})";
+    std::ofstream(outside / "tri.obj") << "v 0 0 0\nv 2 0 0\nv 0 1 4\nf 1 2 3\n";
+    const fs::path cube = proj / "models" / "cube.gltf", side = splash::importSettingsPath(cube);
+    const std::string node = "models/cube/Cube.mesh", baked = "models/cube.mesh";
+    editor::Document doc;
+    doc.reset(splash::Scene{}, proj, "game");
+    auto bytes = [](const fs::path& f) {
+        std::ifstream in(f, std::ios::binary);
+        return std::string(std::istreambuf_iterator<char>(in), {});
+    };
+    // Where an object's mesh (and, with `kids`, its children) is in the world.
+    auto world = [&](const editor::ObjectPath& path, bool kids = false) {
+        std::vector<splash::Vec3> out;
+        const splash::Object* o = doc.object(path);
+        if (!o) return out;
+        std::vector<splash::FlatObject> flat = splash::flatten(doc.scene());
+        for (const splash::FlatObject& fo : flat)
+            if (fo.object == o && o->mesh)
+                for (const splash::Vec3& v : splash::loadMesh(proj / o->mesh->mesh).positions) out.push_back(fo.localToWorld.point(v));
+        for (size_t c = 0; kids && c < o->children.size(); ++c)
+            for (const splash::FlatObject& fo : flat)
+                if (fo.object == &o->children[c]) out.push_back(fo.worldPosition);
+        return out;
+    };
+    auto same = [](const std::vector<splash::Vec3>& a, const std::vector<splash::Vec3>& b) {
+        bool ok = !a.empty() && a.size() == b.size();
+        for (size_t i = 0; ok && i < a.size(); ++i) ok = nearV(a[i], b[i], 1e-4f);
+        if (!ok)
+            for (size_t i = 0; i < a.size() && i < b.size(); ++i)
+                std::fprintf(stderr, "  %zu: (%g %g %g) vs (%g %g %g)\n", i, a[i].x, a[i].y, a[i].z, b[i].x, b[i].y, b[i].z);
+        return ok;
+    };
+    auto bounds = [&](const std::string& mesh) { return splash::loadMesh(proj / mesh).bounds(); };
+    auto sameTransform = [](const splash::Transform& a, const splash::Transform& b) {
+        return a.position == b.position && a.scale == b.scale && a.rotation.x == b.rotation.x && a.rotation.y == b.rotation.y &&
+               a.rotation.z == b.rotation.z && a.rotation.w == b.rotation.w;
+    };
+    auto pivotOf = [&](const fs::path& model, const std::string& mesh) -> std::optional<splash::Vec3> {
+        splash::ImportSettings s = splash::loadImportSettings(model);
+        auto it = s.pivots.find(mesh);
+        if (it == s.pivots.end()) return std::nullopt;
+        return it->second;
+    };
+
+    // The sidecar keeps pivots, and writes the key only with one.
+    {
+        const fs::path m = proj / "models" / "probe.gltf";
+        fs::create_directories(m.parent_path(), ec);
+        splash::ImportSettings s;
+        splash::saveImportSettings(m, s);
+        CHECK(bytes(splash::importSettingsPath(m)).find("pivots") == std::string::npos);
+        s.pivots["models/probe.mesh"] = {0.5f, -1.25f, 3};
+        s.pivots["models/probe/Leg.mesh"] = {0, 2, 0};
+        splash::saveImportSettings(m, s);
+        splash::ImportSettings back = splash::loadImportSettings(m);
+        CHECK(back.pivots.size() == 2 && back.pivots["models/probe.mesh"] == splash::Vec3({0.5f, -1.25f, 3}) &&
+              back.pivots["models/probe/Leg.mesh"] == splash::Vec3({0, 2, 0}) && back.extra.empty());
+        std::ofstream(splash::importSettingsPath(m)) << R"({"pivots": {"models/probe.mesh": [1, 2]}})";
+        bool threw = false;
+        try {
+            splash::loadImportSettings(m);
+        } catch (const std::exception& e) {
+            threw = std::string(e.what()).find("probe.gltf.import.json") != std::string::npos;
+        }
+        CHECK(threw);
+        fs::remove(splash::importSettingsPath(m), ec);
+    }
+
+    // (a) The one-node cube, twice, the first holding a lamp; Bottom centre on the first.
+    CHECK(editor::placeModel(doc, outside / "cube.gltf", std::nullopt, {0}, {4, 5, 6}).error.empty());
+    CHECK(editor::placeModel(doc, cube, std::nullopt, {1}, {-3, 0, 2}).error.empty());
+    doc.edit({1}, [](splash::Object& o) { o.transform.rotation = {0, 0, 0.38268343f, 0.92387953f}; });
+    splash::Object lamp = named("Lamp");
+    lamp.transform.position = {0, 2, 0.5f};
+    doc.insertObject({0, 0}, lamp);
+    CHECK(doc.object({0}) && doc.object({0})->mesh && doc.object({0})->mesh->mesh == node);
+    CHECK(doc.object({1}) && doc.object({1})->mesh && doc.object({1})->mesh->mesh == node);
+    const std::vector<splash::Vec3> w0 = world({0}, true), w1 = world({1});
+    const splash::Transform t0 = doc.object({0})->transform, t1 = doc.object({1})->transform,
+                            tl = doc.object({0, 0})->transform;
+    const std::string meshBefore = bytes(proj / node), sideBefore = bytes(side);
+    const size_t steps = doc.historySize();
+    std::string err;
+    CHECK(editor::pivotBlocker(doc, {0}).empty());
+    CHECK(editor::setPivot(doc, {0}, editor::PivotMode::BottomCentre, {}, &err) && err.empty());
+    CHECK(doc.historySize() == steps + 1);
+    CHECK(same(world({0}, true), w0) && same(world({1}), w1));
+    splash::Bounds b = bounds(node);
+    CHECK(near(b.min().y, 0) && near(b.center.x, 0) && near(b.center.z, 0));
+    CHECK(pivotOf(cube, node).has_value() && !pivotOf(cube, baked));
+    const std::string meshAfter = bytes(proj / node), sideAfter = bytes(side);
+    CHECK(meshAfter != meshBefore && sideAfter != sideBefore);
+
+    // (b) Undo: transforms, mesh and sidecar as they were; redo: as set.
+    CHECK(doc.undo());
+    CHECK(sameTransform(doc.object({0})->transform, t0) && sameTransform(doc.object({1})->transform, t1) &&
+          sameTransform(doc.object({0, 0})->transform, tl));
+    CHECK(bytes(proj / node) == meshBefore && bytes(side) == sideBefore);
+    CHECK(same(world({0}, true), w0) && same(world({1}), w1));
+    CHECK(doc.redo());
+    CHECK(bytes(proj / node) == meshAfter && bytes(side) == sideAfter);
+    CHECK(same(world({0}, true), w0) && same(world({1}), w1));
+
+    // (c) Imported again: the pivot stays, and so does everything.
+    CHECK(editor::reimportModel(doc, cube).error.empty());
+    CHECK(same(world({0}, true), w0) && same(world({1}), w1));
+    b = bounds(node);
+    CHECK(near(b.min().y, 0) && near(b.center.x, 0) && pivotOf(cube, node).has_value());
+
+    // (i) A zero move, or the pivot already there: refused, nothing written.
+    size_t now = doc.historySize();
+    err.clear();
+    CHECK(!editor::setPivot(doc, {0}, editor::PivotMode::Custom, {0, 0, 0}, &err) && !err.empty());
+    CHECK(!editor::setPivot(doc, {1}, editor::PivotMode::BottomCentre, {}, &err));
+    CHECK(doc.historySize() == now && bytes(proj / node) == meshAfter && bytes(side) == sideAfter);
+    // Custom, from the second copy: a point in the mesh as it is now.
+    CHECK(editor::setPivot(doc, {1}, editor::PivotMode::Custom, {0.25f, 0.5f, 0}, &err));
+    CHECK(same(world({0}, true), w0) && same(world({1}), w1));
+    b = bounds(node);
+    CHECK(near(b.min().y, -0.5f) && near(b.center.x, -0.25f));
+    CHECK(pivotOf(cube, node) && near(pivotOf(cube, node)->y, 0.5f));  // 0 + 0.5: the moves add up
+
+    // (g) Merge meshes on: both copies swap to the baked mesh, nothing moves.
+    splash::ImportSettings rs = splash::loadImportSettings(cube);
+    rs.mergeMeshes = true;
+    splash::saveImportSettings(cube, rs);
+    CHECK(editor::reimportModel(doc, cube, false).error.empty());
+    CHECK(doc.object({0})->mesh->mesh == baked && doc.object({1})->mesh->mesh == baked);
+    CHECK(same(world({0}, true), w0) && same(world({1}), w1));
+    // (e) Centre on the baked mesh as well, then imported again.
+    CHECK(editor::setPivot(doc, {1}, editor::PivotMode::Centre, {}, &err));
+    CHECK(same(world({0}, true), w0) && same(world({1}), w1));
+    b = bounds(baked);
+    CHECK(nearV(b.center, {0, 0, 0}, 1e-4f) && pivotOf(cube, baked).has_value());
+    CHECK(editor::reimportModel(doc, cube).error.empty());
+    CHECK(same(world({0}, true), w0) && same(world({1}), w1));
+    // Off again with both meshes pivoted: the second copy goes back to the
+    // node mesh (the first keeps the baked one for its lamp, as without a
+    // pivot), and nothing moves.
+    rs = splash::loadImportSettings(cube);
+    rs.mergeMeshes = false;
+    splash::saveImportSettings(cube, rs);
+    CHECK(editor::reimportModel(doc, cube, true).error.empty());
+    CHECK(doc.object({1})->mesh->mesh == node);
+    CHECK(same(world({0}, true), w0) && same(world({1}), w1));
+    // And on once more, from the node mesh to the pivoted baked mesh.
+    rs.mergeMeshes = true;
+    splash::saveImportSettings(cube, rs);
+    CHECK(editor::reimportModel(doc, cube, false).error.empty());
+    CHECK(doc.object({1})->mesh->mesh == baked);
+    CHECK(same(world({0}, true), w0) && same(world({1}), w1));
+    rs.mergeMeshes = false;
+    splash::saveImportSettings(cube, rs);
+    CHECK(editor::reimportModel(doc, cube, true).error.empty());
+    CHECK(same(world({0}, true), w0) && same(world({1}), w1));
+
+    // (e) A one-node model that is not moved draws the baked mesh: Centre.
+    CHECK(editor::placeModel(doc, outside / "tri.obj", std::nullopt, {2}, {7, 0, 1}).error.empty());
+    CHECK(doc.object({2}) && doc.object({2})->mesh && doc.object({2})->mesh->mesh == "models/tri.mesh");
+    const std::vector<splash::Vec3> w2 = world({2});
+    CHECK(editor::setPivot(doc, {2}, editor::PivotMode::Centre, {}, &err));
+    CHECK(same(world({2}), w2) && nearV(bounds("models/tri.mesh").center, {0, 0, 0}, 1e-4f));
+    CHECK(editor::reimportModel(doc, proj / "models" / "tri.obj").error.empty());
+    CHECK(same(world({2}), w2) && nearV(bounds("models/tri.mesh").center, {0, 0, 0}, 1e-4f));
+
+    // (f) A tree: Body, holding Arm and a user's tag, gets a pivot.
+    CHECK(editor::placeModel(doc, outside / "robot.gltf", std::nullopt, {3}, {0, 0, -4}).error.empty());
+    const editor::ObjectPath body{3, 0}, arm{3, 0, 0};
+    CHECK(doc.object(body) && doc.object(body)->name == "Body" && doc.object(arm) && doc.object(arm)->name == "Arm");
+    splash::Object tag = named("Tag");
+    tag.transform.position = {0.5f, 0.5f, 0.5f};
+    doc.insertObject({3, 0, 1}, tag);
+    const fs::path robot = proj / "models" / "robot.gltf";
+    const std::vector<splash::Vec3> wb = world(body, true), wa = world(arm);
+    CHECK(editor::setPivot(doc, body, editor::PivotMode::Custom, {0.5f, 0.25f, 0}, &err));
+    CHECK(same(world(body, true), wb) && same(world(arm), wa));
+    CHECK(pivotOf(robot, "models/robot/Body.mesh") && !pivotOf(robot, "models/robot/Arm.mesh"));
+    editor::Reimported re = editor::reimportModel(doc, robot);
+    CHECK(re.error.empty());
+    CHECK(same(world(body, true), wb) && same(world(arm), wa));
+    // The node transforms the import made are the ones setPivot left.
+    CHECK(re.model.nodes.size() == 2 && nearV(doc.object(body)->transform.position, re.model.nodes[0].transform.position) &&
+          nearV(doc.object(arm)->transform.position, re.model.nodes[1].transform.position));
+    // A second copy placed now draws where the first does, offset by the drop point.
+    CHECK(editor::placeModel(doc, robot, std::nullopt, {4}, {0, 0, -4}).error.empty());
+    CHECK(same(world({4, 0}), world(body)) && same(world({4, 0, 0}), wa));
+    CHECK(doc.undo());
+
+    // (h) A skinned mesh, and a mesh no import wrote: refused, nothing written.
+    {
+        const fs::path rigs = fs::path(SPLASHEDIT_SOURCE_DIR) / "tests" / "skinimport";
+        fs::copy_file(rigs / "rig_host.gltf", outside / "rig_host.gltf", ec);
+        CHECK(editor::placeModel(doc, outside / "rig_host.gltf", std::nullopt, {4}, {0, 0, 0}).error.empty());
+        editor::ObjectPath skinned;
+        for (const editor::ObjectPath& p : doc.flatPaths())
+            if (p.size() > 1 && p[0] == 4 && doc.object(p)->mesh && doc.object(p)->skin) skinned = p;
+        CHECK(!skinned.empty());
+        const fs::path rig = proj / "models" / "rig_host.gltf";
+        const std::string rigSide = bytes(splash::importSettingsPath(rig));
+        now = doc.historySize();
+        err.clear();
+        CHECK(!skinned.empty() && !editor::pivotBlocker(doc, skinned).empty());
+        CHECK(!skinned.empty() && !editor::setPivot(doc, skinned, editor::PivotMode::Centre, {}, &err) && !err.empty());
+        CHECK(doc.historySize() == now && bytes(splash::importSettingsPath(rig)) == rigSide);
+
+        fs::create_directories(proj / "meshes", ec);
+        splash::Mesh hand;
+        hand.positions = {{0, 0, 0}, {1, 0, 0}, {0, 1, 0}};
+        hand.submeshes = {{0, 1, 2}};
+        splash::saveMesh(hand, proj / "meshes" / "hand.mesh");
+        const std::string handBytes = bytes(proj / "meshes" / "hand.mesh");
+        splash::Object h = named("Hand");
+        h.mesh.emplace();
+        h.mesh->mesh = "meshes/hand.mesh";
+        doc.insertObject({5}, h);
+        now = doc.historySize();
+        err.clear();
+        CHECK(!editor::pivotBlocker(doc, {5}).empty());
+        CHECK(!editor::setPivot(doc, {5}, editor::PivotMode::Centre, {}, &err) && !err.empty());
+        CHECK(doc.historySize() == now && bytes(proj / "meshes" / "hand.mesh") == handBytes &&
+              !fs::exists(proj / "meshes" / "hand.mesh.import.json") && !fs::exists(proj / "meshes" / "hand.import.json"));
+        // An object with no mesh at all.
+        CHECK(!editor::setPivot(doc, {3}, editor::PivotMode::Centre, {}, &err) && doc.historySize() == now);
+    }
+}
+
+// #316: Set pivot keeps the mesh in place in every scene and prefab file of
+// the project too, not only in the open scene: another scene drawing it
+// directly and through prefab instances, a prefab drawing it at its root and
+// one drawing it deeper down, and instances of both in the open scene.
+// Undo puts every file back byte for byte; a file that does not draw the
+// mesh is never written; one that cannot be read stops it, nothing changed.
+namespace pivotfiles {
+namespace fs = std::filesystem;
+
+struct Project {
+    fs::path proj, outside;
+    std::string mesh;  // the cube's node mesh
+};
+
+std::string bytes(const fs::path& f) {
+    std::ifstream in(f, std::ios::binary);
+    return std::string(std::istreambuf_iterator<char>(in), {});
+}
+
+// Every vertex of every object drawing `mesh` in `s` (instances filled in)
+// where it is in the world, and every child of one where it is.
+std::vector<splash::Vec3> worldIn(const Project& p, const splash::Scene& s) {
+    std::vector<splash::Vec3> out;
+    const std::vector<splash::Vec3> verts = splash::loadMesh(p.proj / p.mesh).positions;
+    const std::vector<splash::FlatObject> flat = splash::flatten(s);
+    for (const splash::FlatObject& fo : flat) {
+        if (!fo.object->mesh || fo.object->mesh->mesh != p.mesh) continue;
+        for (const splash::Vec3& v : verts) out.push_back(fo.localToWorld.point(v));
+        for (const splash::Object& c : fo.object->children)
+            for (const splash::FlatObject& g : flat)
+                if (g.object == &c) out.push_back(g.worldPosition);
+    }
+    return out;
+}
+
+// The same for a scene or prefab file as it is on disk.
+std::vector<splash::Vec3> worldInFile(const Project& p, const std::string& rel) {
+    splash::Scene s;
+    if (rel.ends_with(".prefab")) s.objects.push_back(splash::loadPrefab(p.proj / rel).root);
+    else s = splash::loadScene(p.proj / rel);
+    splash::resolvePrefabs(s, p.proj);
+    return worldIn(p, s);
+}
+
+bool same(const std::vector<splash::Vec3>& a, const std::vector<splash::Vec3>& b) {
+    bool ok = !a.empty() && a.size() == b.size();
+    for (size_t i = 0; ok && i < a.size(); ++i) ok = nearV(a[i], b[i], 1e-4f);
+    if (!ok) {
+        std::fprintf(stderr, "  %zu vs %zu points\n", a.size(), b.size());
+        for (size_t i = 0; i < a.size() && i < b.size(); ++i)
+            std::fprintf(stderr, "  %zu: (%g %g %g) vs (%g %g %g)\n", i, a[i].x, a[i].y, a[i].z, b[i].x, b[i].y, b[i].z);
+    }
+    return ok;
+}
+
+splash::Object drawing(const char* name, const std::string& mesh, splash::Vec3 at, splash::Quat rot, splash::Vec3 scale) {
+    splash::Object o = named(name);
+    o.mesh.emplace();
+    o.mesh->mesh = mesh;
+    o.transform.position = at;
+    o.transform.rotation = rot;
+    o.transform.scale = scale;
+    return o;
+}
+
+splash::Object instance(const char* name, const std::string& prefab, splash::Vec3 at, splash::Quat rot) {
+    splash::Object o = named(name);
+    o.prefab = prefab;
+    o.transform.position = at;
+    o.transform.rotation = rot;
+    return o;
+}
+
+// A project with the cube imported, drawn in the open scene (saved as
+// main.scene), in levels/second.scene, in two prefabs, and not at all in
+// other.scene (dated an hour back, so a rewrite shows in its time).
+Project make(const char* name, editor::Document& doc) {
+    std::error_code ec;
+    Project p;
+    const fs::path dir = g_outDir / name;
+    fs::remove_all(dir, ec);
+    p.proj = dir / "game";
+    p.outside = dir / "downloads";
+    fs::create_directories(p.proj / "levels", ec);
+    fs::create_directories(p.proj / "prefabs", ec);
+    fs::create_directories(p.outside, ec);
+    std::ofstream(p.outside / "cube.gltf") << R"({"asset":{"version":"2.0"},"scene":0,"scenes":[{"nodes":[0]}],
+"nodes":[{"name":"Cube","mesh":0,"translation":[5,1,0],"rotation":[0,0.70710678,0,0.70710678],"scale":[2,1,1]}],
+"meshes":[{"primitives":[{"attributes":{"POSITION":0}}]}],
+"accessors":[{"bufferView":0,"componentType":5126,"count":3,"type":"VEC3","min":[0,0,0],"max":[1,1,0]}],
+"bufferViews":[{"buffer":0,"byteLength":36}],
+"buffers":[{"byteLength":36,"uri":"data:application/octet-stream;base64,AAAAAAAAAAAAAAAAAACAPwAAAAAAAAAAAAAAAAAAgD8AAAAA"}]})";
+    doc.reset(splash::Scene{}, p.proj, "main");
+    CHECK(editor::placeModel(doc, p.outside / "cube.gltf", std::nullopt, {0}, {4, 5, 6}).error.empty());
+    CHECK(doc.object({0}) && doc.object({0})->mesh);
+    p.mesh = doc.object({0}) && doc.object({0})->mesh ? doc.object({0})->mesh->mesh : std::string();
+    const splash::Quat turnY{0, 0.38268343f, 0, 0.92387953f}, turnZ{0, 0, 0.38268343f, 0.92387953f};
+
+    // A prefab drawing the cube at its root, holding a tag.
+    splash::Object root = drawing("Crate", p.mesh, {1, 2, 3}, turnZ, {1, 1, 2});
+    splash::Object tag = named("Tag");
+    tag.transform.position = {0, 1, 0};
+    root.children.push_back(tag);
+    splash::savePrefab({root, {}}, p.proj / "prefabs" / "crate.prefab");
+    // A prefab drawing it deeper down: Post > Head (the cube) > Bulb.
+    splash::Object post = named("Post");
+    post.transform.position = {0, 0, 1};
+    splash::Object head = drawing("Head", p.mesh, {0, 3, 0}, turnY, {2, 1, 1});
+    splash::Object bulb = named("Bulb");
+    bulb.transform.position = {0.5f, 0.5f, 0};
+    head.children.push_back(bulb);
+    post.children.push_back(head);
+    splash::savePrefab({post, {}}, p.proj / "prefabs" / "lamppost.prefab");
+
+    // Another scene: the cube with a child, both prefabs placed, and an object without it.
+    splash::Scene second;
+    splash::Object rock = drawing("Rock", p.mesh, {-2, 0, 5}, turnY, {1, 2, 3});
+    splash::Object moss = named("Moss");
+    moss.transform.position = {0.25f, 1, 0};
+    rock.children.push_back(moss);
+    second.objects.push_back(rock);
+    second.objects.push_back(instance("Crate1", "prefabs/crate.prefab", {7, 0, 0}, turnY));
+    second.objects.push_back(instance("Lamp1", "prefabs/lamppost.prefab", {0, 0, -7}, turnZ));
+    second.objects.push_back(named("Empty"));
+    splash::saveScene(second, p.proj / "levels" / "second.scene");
+    // A scene that does not draw the cube.
+    splash::Scene other;
+    other.objects.push_back(named("Alone"));
+    splash::saveScene(other, p.proj / "other.scene");
+    fs::last_write_time(p.proj / "other.scene", fs::file_time_type::clock::now() - std::chrono::hours(1), ec);
+
+    // Instances of both in the open scene, which is saved.
+    std::string err;
+    CHECK(doc.insertPrefab({1}, "prefabs/crate.prefab", {3, 0, 1}, &err));
+    CHECK(doc.insertPrefab({2}, "prefabs/lamppost.prefab", {-3, 0, 1}, &err));
+    CHECK(!doc.save().has_value());
+    return p;
+}
+
+}  // namespace pivotfiles
+
+void testSetPivotOtherFiles() {
+    using namespace pivotfiles;
+    editor::Document doc;
+    const Project p = make("setpivotfiles", doc);
+    const std::vector<std::string> files = {"main.scene", "levels/second.scene", "prefabs/crate.prefab", "prefabs/lamppost.prefab",
+                                            "other.scene"};
+    const std::vector<std::string> drawn = {"levels/second.scene", "prefabs/crate.prefab", "prefabs/lamppost.prefab"};
+    std::map<std::string, std::string> before;
+    std::map<std::string, std::vector<splash::Vec3>> world;
+    for (const std::string& f : files) before[f] = bytes(p.proj / f);
+    for (const std::string& f : drawn) world[f] = worldInFile(p, f);
+    const auto otherTime = std::filesystem::last_write_time(p.proj / "other.scene");
+    // The open scene: the cube, the crate instance (its root draws it) and the lamppost's head.
+    const std::vector<splash::Vec3> open = worldIn(p, doc.scene());
+    CHECK(open.size() == 3 + 4 + 4);
+    CHECK(world["levels/second.scene"].size() == 3 * 4);
+    const splash::Transform crateAt = doc.object({1})->transform;
+
+    const size_t steps = doc.historySize();
+    std::string err;
+    CHECK(editor::pivotBlocker(doc, {0}).empty());
+    CHECK(editor::setPivot(doc, {0}, editor::PivotMode::BottomCentre, {}, &err) && err.empty());
+    if (!err.empty()) std::fprintf(stderr, "  setPivot: %s\n", err.c_str());
+    CHECK(doc.historySize() == steps + 1);
+    const splash::Bounds b = splash::loadMesh(p.proj / p.mesh).bounds();
+    CHECK(near(b.min().y, 0) && near(b.center.x, 0) && near(b.center.z, 0));
+    // Nothing moved, anywhere: the open scene (instances showing their
+    // rewritten prefabs) and every file drawing the cube.
+    CHECK(same(worldIn(p, doc.scene()), open));
+    for (const std::string& f : drawn) CHECK(same(worldInFile(p, f), world[f]));
+    // The crate instance moved where it is placed, its root drawing the cube.
+    CHECK(!nearV(doc.object({1})->transform.position, crateAt.position, 1e-4f));
+    std::map<std::string, std::string> after;
+    for (const std::string& f : files) after[f] = bytes(p.proj / f);
+    for (const std::string& f : drawn) CHECK(after[f] != before[f]);
+    // The open scene's own file waits for its save; a file without the cube is never written.
+    CHECK(after["main.scene"] == before["main.scene"]);
+    CHECK(after["other.scene"] == before["other.scene"] && std::filesystem::last_write_time(p.proj / "other.scene") == otherTime);
+
+    // Undo: every file byte for byte, and still nothing moved.
+    CHECK(doc.undo());
+    for (const std::string& f : files) CHECK(bytes(p.proj / f) == before[f]);
+    CHECK(same(worldIn(p, doc.scene()), open));
+    for (const std::string& f : drawn) CHECK(same(worldInFile(p, f), world[f]));
+    CHECK(nearV(doc.object({1})->transform.position, crateAt.position, 1e-6f));
+    // Redo: as set.
+    CHECK(doc.redo());
+    for (const std::string& f : files) CHECK(bytes(p.proj / f) == after[f]);
+    CHECK(same(worldIn(p, doc.scene()), open));
+    for (const std::string& f : drawn) CHECK(same(worldInFile(p, f), world[f]));
+    CHECK(std::filesystem::last_write_time(p.proj / "other.scene") == otherTime);
+
+    // Saved, and opened again from disk: the open scene is in place too.
+    CHECK(!doc.save().has_value());
+    editor::Document again;
+    CHECK(!again.load(p.proj, "main.scene").has_value());
+    CHECK(same(worldIn(p, again.scene()), open));
+}
+
+void testSetPivotBrokenFile() {
+    using namespace pivotfiles;
+    editor::Document doc;
+    const Project p = make("setpivotbroken", doc);
+    std::ofstream(p.proj / "levels" / "broken.scene") << "{\"format\": \"splashedit-ng/scene\", \"objects\": [";
+    const std::filesystem::path model = p.proj / "models" / "cube.gltf";
+    const std::vector<std::string> files = {"main.scene",          "levels/second.scene", "prefabs/crate.prefab",
+                                            "prefabs/lamppost.prefab", "other.scene",     "levels/broken.scene",
+                                            p.mesh,                splash::importSettingsPath(model).lexically_relative(p.proj).string()};
+    std::map<std::string, std::string> before;
+    for (const std::string& f : files) before[f] = bytes(p.proj / f);
+    const std::vector<splash::Vec3> open = worldIn(p, doc.scene());
+    const splash::Transform t0 = doc.object({0})->transform, t1 = doc.object({1})->transform;
+    const size_t steps = doc.historySize();
+    std::string err;
+    CHECK(!editor::setPivot(doc, {0}, editor::PivotMode::BottomCentre, {}, &err));
+    CHECK(err.find("levels/broken.scene") != std::string::npos);
+    if (err.find("levels/broken.scene") == std::string::npos) std::fprintf(stderr, "  error: %s\n", err.c_str());
+    CHECK(doc.historySize() == steps);
+    for (const std::string& f : files) CHECK(bytes(p.proj / f) == before[f]);
+    CHECK(doc.object({0})->transform.position == t0.position && doc.object({1})->transform.position == t1.position);
+    CHECK(same(worldIn(p, doc.scene()), open));
+    // A prefab file that is not one stops it the same way.
+    std::filesystem::remove(p.proj / "levels" / "broken.scene");
+    std::ofstream(p.proj / "prefabs" / "notone.prefab") << "{\"format\": \"splashedit-ng/scene\"}";
+    err.clear();
+    CHECK(!editor::setPivot(doc, {0}, editor::PivotMode::BottomCentre, {}, &err));
+    CHECK(err.find("prefabs/notone.prefab") != std::string::npos);
+    CHECK(doc.historySize() == steps);
+    for (const std::string& f : files)
+        if (f != "levels/broken.scene") CHECK(bytes(p.proj / f) == before[f]);
+    // Gone, it goes through, and a Unity (YAML) prefab beside ours is left alone.
+    std::filesystem::remove(p.proj / "prefabs" / "notone.prefab");
+    const std::string unity = "%YAML 1.1\n%TAG !u! tag:unity3d.com,2011:\n--- !u!1 &1\nGameObject:\n  m_Name: Crate\n";
+    std::ofstream(p.proj / "prefabs" / "unity.prefab", std::ios::binary) << unity;
+    err.clear();
+    CHECK(editor::setPivot(doc, {0}, editor::PivotMode::BottomCentre, {}, &err));
+    if (!err.empty()) std::fprintf(stderr, "  setPivot with a Unity prefab: %s\n", err.c_str());
+    CHECK(bytes(p.proj / "prefabs" / "unity.prefab") == unity);
+    CHECK(same(worldIn(p, doc.scene()), open));
+}
+
+void testSetPivotPrefabMode() {
+    using namespace pivotfiles;
+    editor::Document doc;
+    const Project p = make("setpivotprefabmode", doc);
+    // The crate open from the main scene, which draws the cube itself: refused.
+    std::string err;
+    CHECK(!doc.openPrefab("prefabs/crate.prefab").has_value() && doc.inPrefabMode());
+    const std::string crateBytes = bytes(p.proj / "prefabs" / "crate.prefab");
+    const std::string why = editor::pivotBlocker(doc, {0});
+    CHECK(why.find("close the prefab first") != std::string::npos);
+    size_t steps = doc.historySize();
+    CHECK(!editor::setPivot(doc, {0}, editor::PivotMode::BottomCentre, {}, &err) && !err.empty());
+    CHECK(doc.historySize() == steps && bytes(p.proj / "prefabs" / "crate.prefab") == crateBytes);
+    CHECK(doc.closePrefab());
+
+    // Open from other.scene, which does not draw it: the prefab moves in
+    // memory, the other files on disk, and main.scene, not open, on disk too.
+    editor::Document side;
+    CHECK(!side.load(p.proj, "other.scene").has_value());
+    CHECK(!side.openPrefab("prefabs/crate.prefab").has_value());
+    const std::vector<splash::Vec3> crate = worldIn(p, side.scene()), second = worldInFile(p, "levels/second.scene"),
+                                    main = worldInFile(p, "main.scene");
+    const std::string otherBytes = bytes(p.proj / "other.scene"), mainBytes = bytes(p.proj / "main.scene");
+    CHECK(editor::pivotBlocker(side, {0}).empty());
+    err.clear();
+    CHECK(editor::setPivot(side, {0}, editor::PivotMode::Centre, {}, &err));
+    if (!err.empty()) std::fprintf(stderr, "  setPivot: %s\n", err.c_str());
+    CHECK(same(worldIn(p, side.scene()), crate));
+    // The open prefab waits for its save, as an open scene does; until then
+    // the files placing it show its old content where they place it now.
+    CHECK(bytes(p.proj / "prefabs" / "crate.prefab") == crateBytes);
+    CHECK(bytes(p.proj / "main.scene") != mainBytes && bytes(p.proj / "other.scene") == otherBytes);
+    CHECK(!side.save().has_value());
+    CHECK(same(worldInFile(p, "levels/second.scene"), second) && same(worldInFile(p, "main.scene"), main));
+}
+
+// #311: a model of one node that is moved (a cube exported from a level) is
+// placed with the node's pivot: the object draws the node's own mesh and
+// carries the node's transform on top of the drop point, every vertex where
+// the baked mesh placed the old way has it. A reimport keeps a transform the
+// user gave it, and Merge meshes swapping the mesh moves nothing.
+void testPlaceOneNodeModel() {
+    namespace fs = std::filesystem;
+    std::error_code ec;
+    fs::path dir = g_outDir / "placeonenode";
+    fs::remove_all(dir, ec);
+    fs::path proj = dir / "game", outside = dir / "downloads";
+    fs::create_directories(proj, ec);
+    fs::create_directories(outside, ec);
+    // Cube: moved 5 along X and 1 up, turned 90 degrees about Y, scaled 2
+    // along X, drawing the triangle (0,0,0) (1,0,0) (0,1,0) in `red`.
+    auto cubeGltf = [](float x, float red) {
+        return std::string(R"({"asset":{"version":"2.0"},"scene":0,"scenes":[{"nodes":[0]}],
+"nodes":[{"name":"Cube","mesh":0,"translation":[)") +
+               std::to_string(x) + R"(,1,0],"rotation":[0,0.70710678,0,0.70710678],"scale":[2,1,1]}],
+"materials":[{"pbrMetallicRoughness":{"baseColorFactor":[)" +
+               std::to_string(red) + R"(,0,0,1]}}],
+"meshes":[{"primitives":[{"attributes":{"POSITION":0},"material":0}]}],
+"accessors":[{"bufferView":0,"componentType":5126,"count":3,"type":"VEC3","min":[0,0,0],"max":[1,1,0]}],
+"bufferViews":[{"buffer":0,"byteLength":36}],
+"buffers":[{"byteLength":36,"uri":"data:application/octet-stream;base64,AAAAAAAAAAAAAAAAAACAPwAAAAAAAAAAAAAAAAAAgD8AAAAA"}]})";
+    };
+    std::ofstream(outside / "cube.gltf") << cubeGltf(5, 1);
+    const fs::path cube = proj / "models" / "cube.gltf";
+    editor::Document doc;
+    doc.reset(splash::Scene{}, proj, "game");
+
+    // Where an object's mesh (and, with `kids`, its children's) is in the world.
+    auto world = [&](const splash::Object* o, bool kids = false) {
+        std::vector<splash::Vec3> out;
+        std::vector<splash::FlatObject> flat = splash::flatten(doc.scene());
+        for (size_t i = 0; i < flat.size(); ++i) {
+            if (flat[i].object != o) continue;
+            for (const splash::Vec3& v : splash::loadMesh(proj / o->mesh->mesh).positions) out.push_back(flat[i].localToWorld.point(v));
+        }
+        for (size_t c = 0; kids && c < o->children.size(); ++c)
+            for (const splash::FlatObject& fo : flat)
+                if (fo.object == &o->children[c]) out.push_back(fo.worldPosition);
+        return out;
+    };
+    auto same = [](const std::vector<splash::Vec3>& a, const std::vector<splash::Vec3>& b) {
+        bool ok = !a.empty() && a.size() == b.size();
+        for (size_t i = 0; ok && i < a.size(); ++i) ok = nearV(a[i], b[i], 1e-4f);
+        if (!ok)
+            for (size_t i = 0; i < a.size() && i < b.size(); ++i)
+                std::fprintf(stderr, "  %zu: (%g %g %g) vs (%g %g %g)\n", i, a[i].x, a[i].y, a[i].z, b[i].x, b[i].y, b[i].z);
+        return ok;
+    };
+
+    // (a) Dropped at (4, 5, 6): the node's transform on top of the drop point.
+    const splash::Vec3 drop{4, 5, 6};
+    editor::PlacedModel p = editor::placeModel(doc, outside / "cube.gltf", std::nullopt, {0}, drop);
+    CHECK(p.error.empty() && p.model.nodes.size() == 1 && doc.historySize() == 1);
+    const splash::Object* root = doc.object({0});
+    CHECK(root && root->name == "cube" && root->children.empty() && root->mesh && root->mesh->mesh == "models/cube/Cube.mesh" &&
+          !root->skin);
+    CHECK(root && root->mesh && root->mesh->materials.size() == 1 && near(root->mesh->materials[0].color[0], 1));
+    const splash::Transform node = p.model.nodes[0].transform;
+    CHECK(near(node.position.x, -5) && near(node.position.y, 1));  // the .mesh space mirrors X
+    CHECK(root && nearV(root->transform.position, node.position + drop) && near(root->transform.rotation.y, node.rotation.y) &&
+          near(root->transform.rotation.w, node.rotation.w) && nearV(root->transform.scale, node.scale));
+    CHECK(root && near(root->transform.position.x, -1) && near(root->transform.scale.x, 2));
+    // The old way: the baked mesh drawn at the drop point.
+    std::vector<splash::Vec3> baked;
+    for (const splash::Vec3& v : splash::loadMesh(proj / "models" / "cube.mesh").positions) baked.push_back(v + drop);
+    const std::vector<splash::Vec3> placed = world(root);
+    CHECK(placed.size() == 3 && same(placed, baked));
+    // As a child of another object, `drop` is in its space: the same holds there.
+    {
+        splash::Object holder = named("Holder");
+        holder.transform.position = {1, 2, 3};
+        doc.insertObject({1}, holder);
+        CHECK(editor::placeModel(doc, outside / "cube.gltf", std::nullopt, {1, 0}, drop).error.empty());
+        std::vector<splash::Vec3> under;
+        for (const splash::Vec3& v : baked) under.push_back(v + splash::Vec3{1, 2, 3});
+        CHECK(doc.object({1, 0}) && same(world(doc.object({1, 0})), under));
+        CHECK(doc.undo() && doc.undo() && doc.scene().objects.size() == 1);
+    }
+
+    // (b) Moved and turned by the user, then reimported from a file where
+    // the cube moved and changed colour: the materials follow, the
+    // transform the user gave stays.
+    root = doc.object({0});
+    CHECK(root && same(world(root), placed));
+    splash::Transform mine = root->transform;
+    mine.position = {10, 0, -3};
+    mine.rotation = {0, 0, 0.38268343f, 0.92387953f};
+    doc.edit({0}, [&](splash::Object& o) { o.transform = mine; });
+    std::ofstream(outside / "cube.gltf") << cubeGltf(7, 0.5f);
+    editor::Reimported re = editor::reimportModel(doc, cube);
+    root = doc.object({0});
+    CHECK(re.error.empty() && root && root->mesh && root->mesh->mesh == "models/cube/Cube.mesh");
+    CHECK(root && root->mesh && root->mesh->materials.size() == 1 && near(root->mesh->materials[0].color[0], 0.5f));
+    CHECK(root && root->transform.position == mine.position && root->transform.rotation.z == mine.rotation.z &&
+          root->transform.scale == mine.scale);
+    // Back where the import put it, for the rest.
+    std::ofstream(outside / "cube.gltf") << cubeGltf(5, 1);
+    CHECK(editor::reimportModel(doc, cube).error.empty());
+    doc.edit({0}, [&](splash::Object& o) { o.transform.position = node.position + drop, o.transform.rotation = node.rotation; });
+    root = doc.object({0});
+    CHECK(root && same(world(root), baked));
+
+    // (c) Skinned, merged or not moved: the baked mesh, as before.
+    {
+        splash::ImportedModel skinned;
+        skinned.mesh = "models/rig.mesh";
+        skinned.skinned = true;
+        skinned.nodes.push_back({});
+        skinned.nodes[0].name = "Body";
+        skinned.nodes[0].transform.position = {5, 0, 0};
+        skinned.nodes[0].mesh = "models/rig/Body.mesh";
+        skinned.nodes[0].skinned = true;
+        splash::Object o = editor::modelObject(skinned, "rig");
+        CHECK(o.mesh && o.mesh->mesh == "models/rig.mesh" && o.transform.position == splash::Vec3{} && o.children.empty());
+        splash::ImportSettings merged;
+        merged.mergeMeshes = true;
+        o = editor::modelObject(p.model, "cube", merged);
+        CHECK(o.mesh && o.mesh->mesh == "models/cube.mesh" && o.transform.position == splash::Vec3{} && o.children.empty());
+        splash::ImportedModel still = p.model;
+        still.nodes[0].transform = {};
+        o = editor::modelObject(still, "cube");
+        CHECK(o.mesh && o.mesh->mesh == "models/cube.mesh" && o.transform.position == splash::Vec3{});
+        // Placed with Merge meshes on in its sidecar: the baked mesh at the drop point.
+        splash::ImportSettings rs = splash::loadImportSettings(cube);
+        rs.mergeMeshes = true;
+        splash::saveImportSettings(cube, rs);
+        p = editor::placeModel(doc, cube, std::nullopt, {1}, drop);
+        CHECK(p.error.empty() && doc.object({1}) && doc.object({1})->mesh && doc.object({1})->mesh->mesh == "models/cube.mesh" &&
+              doc.object({1})->transform.position == drop);
+        CHECK(doc.object({1}) && same(world(doc.object({1})), baked));
+        CHECK(doc.undo());
+        rs.mergeMeshes = false;
+        splash::saveImportSettings(cube, rs);
+    }
+
+    // (d) An object drawing the baked mesh (a project from before) is left
+    // as it is by a reimport: mesh, transform, and so where it is drawn.
+    splash::Object old = named("Old");
+    old.transform.position = {-2, 0, 1};
+    old.transform.scale = {1, 3, 1};
+    old.mesh.emplace();
+    old.mesh->mesh = "models/cube.mesh";
+    doc.insertObject({1}, old);
+    const std::vector<splash::Vec3> oldWorld = world(doc.object({1}));
+    re = editor::reimportModel(doc, cube);
+    CHECK(re.error.empty() && doc.object({1}) && doc.object({1})->mesh->mesh == "models/cube.mesh" &&
+          doc.object({1})->transform.position == old.transform.position && doc.object({1})->transform.scale == old.transform.scale);
+    CHECK(doc.object({1}) && same(world(doc.object({1})), oldWorld));
+
+    // (e) Merge meshes on: the placed cube draws the baked mesh, its
+    // transform taken back to the drop point, nothing moves (a child neither).
+    splash::Object kid = named("Lamp");
+    kid.transform.position = {0, 2, 0};
+    doc.insertObject({0, 0}, kid);
+    // One the user scaled so that no transform keeps it in place: left as it is.
+    p = editor::placeModel(doc, cube, std::nullopt, {2}, drop);
+    CHECK(p.error.empty() && doc.object({2}) && doc.object({2})->mesh->mesh == "models/cube/Cube.mesh");
+    doc.edit({2}, [](splash::Object& o) { o.transform.scale = {2, 3, 1}; });
+    // And an old object scaled evenly and turned, which can take the node's pivot.
+    splash::Object older = named("Older");
+    older.transform.position = {3, 0, 0};
+    older.transform.rotation = {0.38268343f, 0, 0, 0.92387953f};
+    older.transform.scale = {2, 2, 2};
+    older.mesh.emplace();
+    older.mesh->mesh = "models/cube.mesh";
+    doc.insertObject({3}, older);
+    const std::vector<splash::Vec3> before = world(doc.object({0}), true), oldBefore = world(doc.object({1})),
+                                    shearBefore = world(doc.object({2})), olderBefore = world(doc.object({3}));
+    splash::ImportSettings rs = splash::loadImportSettings(cube);
+    rs.mergeMeshes = true;
+    splash::saveImportSettings(cube, rs);
+    re = editor::reimportModel(doc, cube, false);
+    root = doc.object({0});
+    CHECK(re.error.empty() && root && root->mesh && root->mesh->mesh == "models/cube.mesh" && root->children.size() == 1);
+    CHECK(root && nearV(root->transform.position, drop) && near(root->transform.rotation.w, 1) && nearV(root->transform.scale, {1, 1, 1}));
+    CHECK(root && same(world(root, true), before));
+    CHECK(doc.object({1}) && doc.object({1})->mesh->mesh == "models/cube.mesh" && same(world(doc.object({1})), oldBefore));
+    CHECK(doc.object({2}) && doc.object({2})->mesh->mesh == "models/cube/Cube.mesh" &&
+          doc.object({2})->transform.scale == splash::Vec3({2, 3, 1}) && same(world(doc.object({2})), shearBefore));
+    CHECK(doc.object({3}) && doc.object({3})->mesh->mesh == "models/cube.mesh" && same(world(doc.object({3})), olderBefore));
+    // Off again: the node's mesh and pivot are back, still nothing moves. An
+    // old object goes the same way, since the setting asked for it, unless
+    // its scale would shear the node's turn: that one keeps the baked mesh,
+    // as does the cube while it holds the lamp (which would need the node's
+    // scale undone across its turn).
+    rs.mergeMeshes = false;
+    splash::saveImportSettings(cube, rs);
+    re = editor::reimportModel(doc, cube, true);
+    root = doc.object({0});
+    CHECK(re.error.empty() && root && root->mesh && root->mesh->mesh == "models/cube.mesh" && same(world(root, true), before));
+    CHECK(doc.undo());
+    CHECK(doc.removeObject({0, 0}) && doc.object({0})->children.empty());
+    const std::vector<splash::Vec3> alone = world(doc.object({0}));
+    re = editor::reimportModel(doc, cube, true);
+    root = doc.object({0});
+    CHECK(re.error.empty() && root && root->mesh && root->mesh->mesh == "models/cube/Cube.mesh");
+    CHECK(root && nearV(root->transform.position, node.position + drop) && near(root->transform.rotation.y, node.rotation.y) &&
+          nearV(root->transform.scale, node.scale));
+    CHECK(root && same(world(root), alone));
+    CHECK(doc.object({1}) && doc.object({1})->mesh->mesh == "models/cube.mesh" && same(world(doc.object({1})), oldBefore));
+    CHECK(doc.object({2}) && same(world(doc.object({2})), shearBefore));
+    CHECK(doc.object({3}) && doc.object({3})->mesh->mesh == "models/cube/Cube.mesh" && same(world(doc.object({3})), olderBefore));
+    // One undo step each way.
+    CHECK(doc.undo() && doc.object({0}) && doc.object({0})->mesh->mesh == "models/cube.mesh");
 }
 
 // The loop an imported clip starts with comes from its name: a word starting
@@ -10866,6 +11718,123 @@ void testUiFonts() {
     CHECK(std::count(px.begin(), px.end(), 0xffffffffu) > 10);
 }
 
+// Bitmap font spacing (#310): without explicit advances, each character
+// advances by its ink plus `gap` columns, or by a full cell when monospace;
+// advances given in the scene win over both. The scene file keeps the two
+// only when they differ from the defaults, and the editor's sheet cache
+// rebuilds when either changes.
+void testUiFontSpacing() {
+    namespace fs = std::filesystem;
+    const fs::path dir = g_outDir / "fontspacing";
+    fs::remove_all(dir);
+    fs::create_directories(dir);
+    // 8x8 cells, 32 a row: glyph i inks columns 0..i%7 of its third row,
+    // except 0 (space) and 5, which are empty.
+    auto inked = [](int i) { return i != 0 && i != 5; };
+    splash::Image img;
+    img.width = 256, img.height = 24;
+    img.pixels.assign(size_t(256) * 24, splash::Image::Px{0, 0, 0, 0});
+    for (int i = 0; i < 95; i++)
+        if (inked(i))
+            for (int x = 0; x <= i % 7; x++) {
+                const int px = (i % 32) * 8 + x, py = (i / 32) * 8 + 2;
+                img.pixels[size_t(23 - py) * 256 + px] = splash::Image::Px{1, 1, 1, 1};  // rows are bottom-up
+            }
+    splash::savePng(img, dir / "font.png");
+    splash::UIFont uf;
+    uf.name = "bm";
+    uf.bitmap = "font.png";
+    uf.glyphWidth = 8;
+    uf.glyphHeight = 8;
+    CHECK(!uf.monospace && uf.gap == 1);
+    auto advances = [&](const splash::UIFont& f) { return splash::buildFont(f, dir).advances; };
+    // Gap 1, the default: the measurement as it was, ink plus one, empty half a cell.
+    const std::array<uint8_t, 96> one = advances(uf);
+    bool same = true;
+    for (int i = 0; i < 95; i++) same = same && one[size_t(i)] == (inked(i) ? i % 7 + 2 : 4);
+    CHECK(same && one[95] == 8);
+    // Gap 0: each inked character one narrower; gap 3: two wider. Empty cells and 0x7F keep theirs.
+    splash::UIFont g0 = uf, g3 = uf;
+    g0.gap = 0;
+    g3.gap = 3;
+    const std::array<uint8_t, 96> zero = advances(g0), three = advances(g3);
+    bool less = true, more = true;
+    for (int i = 0; i < 95; i++) {
+        less = less && zero[size_t(i)] == (inked(i) ? one[size_t(i)] - 1 : one[size_t(i)]);
+        more = more && three[size_t(i)] == (inked(i) ? one[size_t(i)] + 2 : one[size_t(i)]);
+    }
+    CHECK(less && zero[95] == 8);
+    CHECK(more && three[95] == 8);
+    // Monospace: every advance the cell width, whatever the gap.
+    splash::UIFont mono = g3;
+    mono.monospace = true;
+    const std::array<uint8_t, 96> m = advances(mono);
+    CHECK(std::all_of(m.begin(), m.end(), [](uint8_t a) { return a == 8; }));
+    // Explicit advances override both.
+    splash::UIFont given = mono;
+    given.gap = 0;
+    given.advances.assign(96, 5);
+    const std::array<uint8_t, 96> gv = advances(given);
+    CHECK(std::all_of(gv.begin(), gv.end(), [](uint8_t a) { return a == 5; }));
+    given.monospace = false;
+    CHECK(advances(given) == gv);
+
+    // The scene file: defaults left out, others kept and read back.
+    auto slurp = [](const fs::path& f) {
+        std::ifstream in(f, std::ios::binary);
+        return std::string((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    };
+    splash::Scene sc;
+    sc.fonts.push_back(uf);
+    splash::saveScene(sc, dir / "plain.scene");
+    const std::string plain = slurp(dir / "plain.scene");
+    CHECK(plain.find("monospace") == std::string::npos && plain.find("\"gap\"") == std::string::npos);
+    const splash::Scene pb = splash::loadScene(dir / "plain.scene");
+    CHECK(pb.fonts.size() == 1 && !pb.fonts[0].monospace && pb.fonts[0].gap == 1 && pb.fonts[0].extra.empty());
+    splash::saveScene(pb, dir / "plain2.scene");
+    CHECK(slurp(dir / "plain2.scene") == plain);
+    sc.fonts[0].monospace = true;
+    sc.fonts[0].gap = 0;
+    splash::saveScene(sc, dir / "set.scene");
+    const std::string set = slurp(dir / "set.scene");
+    CHECK(set.find("\"monospace\": true") != std::string::npos && set.find("\"gap\": 0") != std::string::npos);
+    const splash::Scene sb = splash::loadScene(dir / "set.scene");
+    CHECK(sb.fonts.size() == 1 && sb.fonts[0].monospace && sb.fonts[0].gap == 0 && sb.fonts[0].extra.empty());
+    sc.fonts[0].monospace = false;
+    sc.fonts[0].gap = 16;
+    splash::saveScene(sc, dir / "wide.scene");
+    CHECK(splash::loadScene(dir / "wide.scene").fonts[0].gap == 16);
+    // A gap outside 0..16 is refused.
+    {
+        std::string text = slurp(dir / "wide.scene");
+        const size_t at = text.find("\"gap\": 16");
+        CHECK(at != std::string::npos);
+        if (at != std::string::npos) text.replace(at, std::strlen("\"gap\": 16"), "\"gap\": 17");
+        std::ofstream(dir / "bad.scene", std::ios::binary) << text;
+        std::string why;
+        try {
+            splash::loadScene(dir / "bad.scene");
+        } catch (const std::exception& e) {
+            why = e.what();
+        }
+        CHECK(why.find("gap must be 0..16") != std::string::npos);
+    }
+
+    // The editor's sheet follows a change to either.
+    editor::uic::Assets assets;
+    assets.refresh(dir, 0);
+    splash::Scene es;
+    es.fonts.push_back(uf);
+    const splash::FontSheet* a = assets.font(es, "bm");
+    CHECK(a && a->advances == one);
+    es.fonts[0].gap = 3;
+    a = assets.font(es, "bm");
+    CHECK(a && a->advances == three);
+    es.fonts[0].monospace = true;
+    a = assets.font(es, "bm");
+    CHECK(a && a->advances == m);
+}
+
 // A canvas's default font (PSXCanvas.defaultFont): the scene file keeps it
 // (null for the system font, never in the extras); a text element without a
 // font of its own resolves to it; font rename and delete rewrite it in the
@@ -11263,9 +12232,10 @@ void testUiRender() {
     isc.canvases[0].elements.push_back(im);
     std::vector<uint32_t> ip = render(isc, {true}, s, assets, bg);
     auto iat = [&](int x, int y) { return ip[size_t(y) * 320 + size_t(x)]; };
-    // u = x * (3 - 1) / 6: red, red, red, green, green, green; blue never shows.
-    CHECK(iat(10, 10) == 0xff0000ffu && iat(12, 11) == 0xff0000ffu);
-    CHECK(iat(13, 10) == 0xff00ff00u && iat(15, 11) == 0xff00ff00u && iat(16, 10) == bg);
+    // At 2x the UVs end on the last texel, rounded to nearest: red, red, green, green, green, blue.
+    CHECK(iat(10, 10) == 0xff0000ffu && iat(11, 11) == 0xff0000ffu);
+    CHECK(iat(12, 10) == 0xff00ff00u && iat(14, 11) == 0xff00ff00u);
+    CHECK(iat(15, 10) == 0xffff0000u && iat(15, 11) == 0xffff0000u && iat(16, 10) == bg);
     isc.canvases[0].elements[0].color = {0.25f, 0.25f, 0.25f};  // tint 64: half as bright
     std::vector<uint32_t> dim = render(isc, {true}, s, assets, bg);
     CHECK(dim[10 * 320 + 10] == 0xff00007bu);
@@ -12973,6 +13943,170 @@ void testVertexPaintMismatch() {
     CHECK(!d.paintMismatch(*d.object({0})->mesh) && !d.hasWarning(*d.object({0})));
 }
 
+namespace {
+
+// A closed box from `lo` to `hi`: four vertices and an outward normal per face.
+splash::Mesh aoBox(splash::Vec3 lo, splash::Vec3 hi) {
+    splash::Mesh m;
+    std::vector<int> tris;
+    for (int axis = 0; axis < 3; axis++)
+        for (int side = 0; side < 2; side++) {
+            const int u = (axis + 1) % 3, v = (axis + 2) % 3;
+            const int base = int(m.positions.size());
+            for (int k = 0; k < 4; k++) {
+                float c[3];
+                c[axis] = side ? hi[axis] : lo[axis];
+                c[u] = (k & 1) ? hi[u] : lo[u];
+                c[v] = (k & 2) ? hi[v] : lo[v];
+                m.positions.push_back({c[0], c[1], c[2]});
+                float n[3] = {0, 0, 0};
+                n[axis] = side ? 1.f : -1.f;
+                m.normals.push_back({n[0], n[1], n[2]});
+            }
+            tris.insert(tris.end(), {base, base + 1, base + 3, base, base + 3, base + 2});
+        }
+    m.submeshes = {tris};
+    return m;
+}
+
+std::vector<editor::AoTriangle> aoTriangles(const splash::Mesh& m, splash::Vec3 at = {}) {
+    std::vector<editor::AoTriangle> out;
+    for (const std::vector<int>& sub : m.submeshes)
+        for (size_t k = 0; k + 2 < sub.size(); k += 3)
+            out.push_back({m.positions[size_t(sub[k])] + at, m.positions[size_t(sub[k + 1])] + at, m.positions[size_t(sub[k + 2])] + at});
+    return out;
+}
+
+}  // namespace
+
+// The occlusion kernel (#305): an open plane hides nothing; in a corner of a
+// floor and two walls the corner is darker than the foot of one wall, which
+// is darker than the open floor; the same input gives the same output.
+void testVertexAoKernel() {
+    // (a) A vertex on an open plane, and one on its edge, see the whole sky.
+    const std::vector<editor::AoTriangle> plane = aoTriangles(paintGrid(11, 10));
+    const std::vector<float> open = editor::ambientOcclusion(plane, {{0, 0, 0}, {5, 0, 5}, {1.3f, 0, -2.7f}},
+                                                             {{0, 1, 0}, {0, 1, 0}, {0, 1, 0}}, 2.0f);
+    CHECK(open.size() == 3);
+    for (float a : open) CHECK(std::fabs(a - 1.f) <= 1e-6f);
+    // Facing down into the plane from half a metre over it, far enough to reach it: all but the grazing rays meet it.
+    const std::vector<float> down = editor::ambientOcclusion(plane, {{0, 0.5f, 0}}, {{0, -1, 0}}, 10.0f);
+    CHECK(down.size() == 1 && down[0] < 0.05f);
+
+    // (b) Floor 0..4 on x and z; solid walls behind x = 0 and z = 0, 3 m high.
+    std::vector<editor::AoTriangle> corner = aoTriangles(paintGrid(5, 4), {2, 0, 2});
+    for (const editor::AoTriangle& t : aoTriangles(aoBox({-0.2f, 0, -0.2f}, {0, 3, 4}))) corner.push_back(t);
+    for (const editor::AoTriangle& t : aoTriangles(aoBox({-0.2f, 0, -0.2f}, {4, 3, 0}))) corner.push_back(t);
+    const std::vector<splash::Vec3> at{{0, 0, 0}, {0, 0, 2}, {3.5f, 0, 3.5f}};
+    const std::vector<splash::Vec3> up(3, {0, 1, 0});
+    const std::vector<float> ao = editor::ambientOcclusion(corner, at, up, 2.0f);
+    std::printf("vertex ao corner %.4f wall foot %.4f open floor %.4f\n", double(ao[0]), double(ao[1]), double(ao[2]));
+    CHECK(ao.size() == 3);
+    CHECK(ao[0] < ao[1] && ao[1] < ao[2]);
+    // Roughly what the walls' share of the cosine-weighted hemisphere is: a quarter open in the corner, half at one wall.
+    CHECK(ao[0] > 0.15f && ao[0] < 0.45f);
+    CHECK(ao[1] > 0.4f && ao[1] < 0.7f);
+    CHECK(std::fabs(ao[2] - 1.f) <= 1e-6f);  // 3.5 m from both walls, past the 2 m reach
+    // A longer reach takes in more of the walls' height.
+    const std::vector<float> far = editor::ambientOcclusion(corner, at, up, 10.0f);
+    CHECK(far[1] <= ao[1] && far[2] < 1.f);
+
+    // (c) The same input twice: the same output, bit for bit.
+    CHECK(editor::ambientOcclusion(corner, at, up, 2.0f) == ao);
+    CHECK(editor::ambientOcclusion(corner, at, up, 2.0f, 64) == editor::ambientOcclusion(corner, at, up, 2.0f, 64));
+    // No rays, or a zero normal: open.
+    CHECK(editor::ambientOcclusion(corner, at, up, 2.0f, 0) == std::vector<float>(3, 1.f));
+    CHECK(editor::ambientOcclusion(corner, {{0, 0, 0}}, {{0, 0, 0}}, 2.0f) == std::vector<float>(1, 1.f));
+}
+
+// Bake occlusion on a document (#305): a grid with a wall along one edge
+// darkens near the wall and not far from it, goes Painted with a full layer,
+// in one undo step; terrains and skinned meshes are refused as targets and
+// skinned meshes do not occlude.
+void testVertexAoBake() {
+    const fs::path dir = g_outDir / "vertexao";
+    fs::remove_all(dir);
+    fs::create_directories(dir);
+    splash::saveMesh(paintGrid(11, 10), dir / "grid.mesh");      // x, z -5..5
+    splash::saveMesh(aoBox({-5, 0, 5}, {5, 2, 5.3f}), dir / "wall.mesh");  // along the far edge, z 5
+    splash::Scene s;
+    s.objects.push_back(paintObject("Grid", 0, splash::VertexColorMode::Flat));
+    splash::Object wall = named("Wall", 0);
+    wall.mesh.emplace();
+    wall.mesh->mesh = "wall.mesh";
+    wall.mesh->materials.push_back({});
+    s.objects.push_back(wall);
+    s.objects.push_back(paintLamp());
+    splash::Object skinned = paintObject("Skinned", 0, splash::VertexColorMode::Flat);
+    skinned.transform.position = {0, 0.5f, 0};  // half a metre over the grid: would close it in if it occluded
+    skinned.skin.emplace();
+    s.objects.push_back(skinned);
+    splash::Object terrain = named("Terrain", 40);
+    splash::TerrainComponent& t = terrain.terrain.emplace();
+    t.sizeX = t.sizeZ = 10;
+    splash::initTerrain(t, 4);
+    terrain.mesh.emplace().materials.resize(1);
+    s.objects.push_back(terrain);
+    editor::Document d;
+    d.reset(s, dir);
+    CHECK(editor::paintRefusal(d, {0}).empty());
+
+    // (d) It darkens, by the wall only, and is one undo step.
+    const std::vector<editor::Rgb> before = editor::currentPaint(d, {0});
+    CHECK(before.size() == 121 && before[0] == editor::Rgb({40, 90, 200}));
+    const size_t history = d.historySize();
+    editor::OcclusionBake o;
+    CHECK(editor::bakeOcclusion(d, {{0}}, o) == 1);
+    CHECK(d.historySize() == history + 1);
+    CHECK(d.object({0})->mesh->vertexColors == splash::VertexColorMode::Painted);
+    const std::vector<editor::Rgb> baked = d.object({0})->mesh->paint;
+    CHECK(baked.size() == 121);
+    int darker = 0, brighter = 0;
+    for (size_t i = 0; i < baked.size(); i++)
+        for (size_t ch = 0; ch < 3; ch++) darker += baked[i][ch] < before[i][ch], brighter += baked[i][ch] > before[i][ch];
+    CHECK(darker > 0 && brighter == 0);
+    // The row at the wall's foot (z 5) loses about half its sky: 1 - 0.6 * 0.5 of blue 200 is about 140.
+    const size_t foot = 10 * 11 + 5, open = 2 * 11 + 5;  // (0, 5) and (0, -3), 8 m from the wall
+    if (baked.size() == 121)
+        std::printf("vertex ao bake foot %d %d %d open %d %d %d\n", baked[foot][0], baked[foot][1], baked[foot][2], baked[open][0],
+                    baked[open][1], baked[open][2]);
+    CHECK(baked.size() == 121 && baked[foot][2] < 170 && baked[foot][2] > 110);
+    CHECK(baked.size() == 121 && baked[open] == before[open]);  // nothing within 2 m: the skinned mesh above does not occlude
+    // Asked again it multiplies in again, its own step.
+    CHECK(editor::bakeOcclusion(d, {{0}}, o) == 1 && d.historySize() == history + 2);
+    CHECK(baked.size() == 121 && d.object({0})->mesh->paint[foot][2] < baked[foot][2]);
+    CHECK(d.undo() && d.object({0})->mesh->paint == baked);
+    CHECK(d.undo());
+    CHECK(d.object({0})->mesh->vertexColors == splash::VertexColorMode::Flat && d.object({0})->mesh->paint.empty());
+    CHECK(editor::currentPaint(d, {0}) == before);
+    // From a painted layer: one undo puts that exact layer back.
+    CHECK(editor::fillPaint(d, {{0}}, {100, 150, 250}) == 1);
+    const std::vector<editor::Rgb> filled = d.object({0})->mesh->paint;
+    const size_t h2 = d.historySize();
+    editor::OcclusionBake strong;
+    strong.strength = 1;
+    strong.distance = 3;
+    CHECK(editor::bakeOcclusion(d, {{0}}, strong) == 1 && d.historySize() == h2 + 1);
+    CHECK(d.object({0})->mesh->paint[foot][2] < 150);
+    CHECK(d.undo() && d.object({0})->mesh->paint == filled && d.object({0})->mesh->vertexColors == splash::VertexColorMode::Painted);
+    // Strength 0 changes nothing.
+    editor::OcclusionBake none;
+    none.strength = 0;
+    CHECK(editor::bakeOcclusion(d, {{0}}, none) == 0 && d.historySize() == h2 + 1);
+
+    // (e) Terrains and skinned meshes are not targets; the others in the list still bake.
+    CHECK(!editor::paintRefusal(d, {3}).empty() && !editor::paintRefusal(d, {4}).empty());
+    CHECK(editor::bakeOcclusion(d, {{3}, {4}}, o) == 0);
+    CHECK(d.object({3})->mesh->paint.empty() && d.object({4})->mesh->paint.empty());
+    CHECK(d.object({3})->mesh->vertexColors == splash::VertexColorMode::Flat);
+    CHECK(editor::bakeOcclusion(d, {{3}, {0}, {4}}, o) == 1 && d.object({3})->mesh->paint.empty());
+    CHECK(d.undo());
+    // A terrain occludes: lifted a metre over the grid, it closes the open vertex in.
+    d.edit({4}, [](splash::Object& ob) { ob.transform.position = {0, 1, 0}; });
+    CHECK(editor::bakeOcclusion(d, {{0}}, o) == 1);
+    CHECK(d.object({0})->mesh->paint[open][2] < 150);
+}
+
 // couldBe4bpp over every material: true only when each textured material's
 // texture reads and fits 16 colours, and together they shrink at 4 bpp.
 void testMaterials4bpp() {
@@ -13538,7 +14672,7 @@ void testUiSprite() {
         auto ex = [](int c5) { return uint32_t((c5 << 3) | (c5 >> 2)); };
         for (int y = 0; y < 16 && t.error.empty(); y++)
             for (int x = 0; x < 16; x++) {
-                const uint16_t w = t.words[size_t(16 + y * 15 / 16) * 64 + size_t(32 + x * 15 / 16)];
+                const uint16_t w = t.words[size_t(16 + y) * 64 + size_t(32 + x)];  // 1:1: one texel per pixel
                 const uint32_t want = w ? 0xff000000u | (ex((w >> 10) & 31) << 16) | (ex((w >> 5) & 31) << 8) | ex(w & 31) : 0u;
                 const uint32_t got = px[size_t(20 + y) * size_t(s.w) + size_t(10 + x)];
                 bad += got != want;
@@ -14442,6 +15576,48 @@ void testListScroll() {
     CHECK(ui::edgeScrollSpeed(120, 100, 130, 26, 900) == 0);  // a view too short to have edges
 }
 
+// A colour picker opened from a well stays on screen (#324): under the field
+// when it fits, above it near the screen's bottom, pulled in from the right
+// edge, its top on screen when it is taller than the screen, and a picker
+// lined up with the field's right edge (pivot 1) keeps that alignment.
+void testPopupPlace() {
+    const ui::PopupBox screen{0, 0, 1600, 960};
+    const float W = 236, H = 290, gap = 4, m = 4;
+    // Mid-screen, left-aligned: under the field, its left on the field's left.
+    ui::PopupPos p = ui::popupBelow({600, 400, 900, 424}, W, H, screen, 0, gap, m);
+    CHECK(p.x == 600 && p.y == 428);
+    // Mid-screen, right-aligned (pivot 1): its right edge on the field's right.
+    p = ui::popupBelow({600, 400, 900, 424}, W, H, screen, 1, gap, m);
+    CHECK(p.x + W == 900 && p.y == 428);
+    // Near the bottom: above the field, its bottom `gap` over the field's top; alignment kept.
+    p = ui::popupBelow({1300, 880, 1580, 904}, W, H, screen, 1, gap, m);
+    CHECK(p.y + H == 876 && p.x + W == 1580);
+    p = ui::popupBelow({20, 880, 300, 904}, W, H, screen, 0, gap, m);
+    CHECK(p.y + H == 876 && p.x == 20);
+    // Exactly fits below (its bottom on the margin): stays below.
+    p = ui::popupBelow({600, 400, 900, 960 - m - H - gap}, W, H, screen, 0, gap, m);
+    CHECK(p.y == 960 - m - H);
+    // Near the right edge, left-aligned: pulled in to the margin.
+    p = ui::popupBelow({1500, 400, 1590, 424}, W, H, screen, 0, gap, m);
+    CHECK(p.x + W == 1600 - m && p.y == 428);
+    // Right-aligned to a field hanging off the left: pushed in to the left margin.
+    p = ui::popupBelow({-50, 400, 100, 424}, W, H, screen, 1, gap, m);
+    CHECK(p.x == m);
+    // No room above or below (a short screen): clamped inside it.
+    p = ui::popupBelow({600, 150, 900, 174}, W, H, {0, 0, 1600, 320}, 0, gap, m);
+    CHECK(p.y >= m && p.y + H <= 320 - m);
+    // Taller than the screen: its top pinned to the top margin, wherever the field is.
+    for (float fy : {10.0f, 150.0f, 280.0f}) {
+        p = ui::popupBelow({600, fy, 900, fy + 24}, W, 500, {0, 0, 1600, 320}, 1, gap, m);
+        CHECK(p.y == m && p.x + W == 900);
+    }
+    // A screen not at the origin (a work area under a menu bar).
+    p = ui::popupBelow({600, 30, 900, 54}, W, H, {0, 40, 1600, 960}, 0, gap, m);
+    CHECK(p.y == 58);
+    p = ui::popupBelow({600, 900, 900, 924}, W, H, {0, 40, 1600, 960}, 0, gap, m);
+    CHECK(p.y + H == 896);
+}
+
 // Dragging a whole-number field moves it one per pixel at any size (#174):
 // a 300 px wide element grows by 5 for 5 px, not by 15; Shift takes 10 px
 // per step. Other fields keep growing with the value.
@@ -14470,6 +15646,32 @@ void testNumberScrub() {
     CHECK(std::fabs(ui::scrubRate(300, false, false).perPixel - 3) < 1e-4f);
     CHECK(std::fabs(ui::scrubRate(0.5f, false, false).perPixel - 0.01f) < 1e-6f);
     CHECK(std::fabs(drag(2.0f, {1}, false, false) - 2.02f) < 1e-4f);
+}
+
+// Up and Down in a number field being typed into step the typed value (#158):
+// one for whole numbers, a tenth otherwise (a hundredth with Shift); what is
+// no number is left alone.
+void testNumberKeyStep() {
+    auto step = [](std::string t, int dir, float by) {
+        return ui::stepTyped(t, dir, by) ? t : "(none) " + t;
+    };
+    CHECK(ui::keyStep(true, false) == 1 && ui::keyStep(true, true) == 1);
+    CHECK(ui::keyStep(false, false) == 0.1f && ui::keyStep(false, true) == 0.01f);
+    CHECK(step("8", 1, 1) == "9");
+    CHECK(step("8", -1, 1) == "7");
+    CHECK(step("0", -1, 1) == "-1");
+    CHECK(step(" 12 ", 1, 1) == "13");  // spaces around it, as the commit takes them
+    CHECK(step("1", -1, 1) == "0");
+    CHECK(step("0.2", 1, 0.1f) == "0.3");
+    CHECK(step("0.1", -1, 0.1f) == "0");
+    CHECK(step("0.25", 1, 0.1f) == "0.35");
+    CHECK(step("-0.05", 1, 0.1f) == "0.05");
+    CHECK(step("", 1, 1) == "(none) ");
+    CHECK(step("-", 1, 1) == "(none) -");
+    CHECK(step("12px", 1, 1) == "(none) 12px");
+    std::string t = "2";
+    for (int i = 0; i < 10; i++) CHECK(ui::stepTyped(t, 1, 0.1f));
+    CHECK(t == "3");
 }
 
 // A scrub on a "mixed" multi-object field (#263) moves each value by the
@@ -16135,6 +17337,107 @@ gpuraster::Gpu gpdRender(const std::vector<uint32_t>& frame, std::vector<uint32_
     return gpu;
 }
 
+// ---- UI image preview: which texel each pixel shows (splashedit-ng#331).
+
+// The texel (u << 8 | v) at each pixel of a w x h image drawn from a tw x th
+// texture as psxsplash#135 draws a scaled one: two gouraud triangles over the
+// rect, UVs from 0 to tw (th) below 2x, else to tw - 1 (th - 1), through the
+// gpu_raster model. Texel (u, v) is the 15-bit word v * 128 + u + 1 at 512,0.
+std::vector<int> uiImageGpuTexels(int tw, int th, int w, int h) {
+    std::vector<uint32_t> f = {0xa0000000, gpdXY(512, 0), gpdXY(tw, th)};
+    for (int i = 0; i < tw * th; i += 2) {
+        auto word = [&](int k) { return k < tw * th ? uint32_t((k / tw) * 128 + k % tw + 1) : 0u; };
+        f.push_back(word(i) | word(i + 1) << 16);
+    }
+    const uint32_t uR = w < 2 * tw ? tw : tw - 1, vB = h < 2 * th ? th : th - 1, page = 0x108u << 16;  // 15-bit, x 512
+    auto vtx = [&](uint32_t cmd, int x, int y, uint32_t u, uint32_t v, uint32_t extra) {
+        f.insert(f.end(), {cmd | 0x808080, gpdXY(x, y), extra | v << 8 | u});
+    };
+    vtx(0x35000000, 0, 0, 0, 0, 0), vtx(0, w, 0, uR, 0, page), vtx(0, 0, h, 0, vB, 0);         // raw: texels as they are
+    vtx(0x35000000, w, 0, uR, 0, 0), vtx(0, w, h, uR, vB, page), vtx(0, 0, h, 0, vB, 0);
+    gpuraster::Options o;
+    o.dither = false;
+    const gpuraster::Gpu g = gpdRender(f, {}, o);
+    std::vector<int> out;
+    for (int y = 0; y < h; y++)
+        for (int x = 0; x < w; x++) {
+            const int k = (g.at(x, y) & 0x7fff) - 1;
+            out.push_back(k < 0 ? -1 : (k % 128) << 8 | k / 128);
+        }
+    return out;
+}
+
+void testUiImageTexels() {
+    using namespace editor::uic;
+    const Screen s;
+    // A texture whose every texel is its own colour: (u, v) is red u & 31, green 16 + u / 32, blue v.
+    auto texture = [](const char* name, int tw, int th) {
+        splash::Image img;
+        img.width = tw;
+        img.height = th;
+        for (int v = th - 1; v >= 0; v--)  // splash::Image rows run bottom-up
+            for (int u = 0; u < tw; u++) img.pixels.push_back({(u & 31) / 31.f, (16 + u / 32) / 31.f, v / 31.f, 1});
+        splash::savePng(img, g_outDir / name);
+    };
+    // The texel (u << 8 | v) at each pixel of the preview of `name` drawn at w x h, -1 for none.
+    auto preview = [&](const char* name, int w, int h) {
+        splash::Scene sc;
+        sc.canvases.resize(1);
+        splash::UIElement im = uiBox("im", 16, 40, w, h);
+        im.type = splash::UIElementType::Image;
+        im.texture = name;
+        im.bitDepth = splash::BitDepth::Bpp16;
+        im.color = {0.5f, 0.5f, 0.5f};  // tint 128: the texels as they are
+        sc.canvases[0].elements.push_back(im);
+        Assets assets;
+        assets.refresh(g_outDir, 0);
+        const std::vector<uint32_t> px = render(sc, {true}, s, assets, 0);
+        auto c5 = [](uint32_t p, int sh) { return int((p >> sh) & 0xff) >> 3; };
+        std::vector<int> out;
+        for (int y = 0; y < h; y++)
+            for (int x = 0; x < w; x++) {
+                const uint32_t p = px[size_t(40 + y) * size_t(s.w) + size_t(16 + x)];
+                out.push_back(p ? (c5(p, 0) | (c5(p, 8) - 16) << 5) << 8 | c5(p, 16) : -1);
+            }
+        return out;
+    };
+    // Measured in pcsx-redux from psxsplash#135 (scene uiimg.scene, a 128x13
+    // one-texel checkerboard at 1:1, 2x and 1.5x): how many pixels each texel
+    // takes, per column (u) and per row (v), the same in every row and column.
+    struct Case {
+        int w, h;
+        const char *uRuns, *vRuns;
+    };
+    const std::string one(128, '1'), twos = std::string(64, '2') + "3" + std::string(62, '2') + "1",
+                      halves = [] { std::string r; for (int i = 0; i < 64; i++) r += "12"; return r; }();
+    const Case cases[] = {{128, 13, one.c_str(), "1111111111111"},
+                          {256, 26, twos.c_str(), "2222223222221"},
+                          {192, 19, halves.c_str(), "1212121121212"}};
+    texture("uitexels.png", 128, 13);
+    for (const Case& c : cases) {
+        std::vector<int> want;
+        auto expand = [](const char* runs) {
+            std::vector<int> seq;
+            for (int k = 0; runs[k]; k++) seq.insert(seq.end(), size_t(runs[k] - '0'), k);
+            return seq;
+        };
+        const std::vector<int> us = expand(c.uRuns), vs = expand(c.vRuns);
+        CHECK(int(us.size()) == c.w && int(vs.size()) == c.h);
+        for (int y = 0; y < c.h; y++)
+            for (int x = 0; x < c.w; x++) want.push_back(us[size_t(x)] << 8 | vs[size_t(y)]);
+        const std::vector<int> got = preview("uitexels.png", c.w, c.h);
+        int bad = 0;
+        for (size_t i = 0; i < got.size(); i++) bad += got[i] != want[i];
+        if (bad) std::fprintf(stderr, "uiimage %dx%d: %d of %zu pixels show another texel\n", c.w, c.h, bad, got.size());
+        CHECK(bad == 0);
+        CHECK(uiImageGpuTexels(128, 13, c.w, c.h) == want);  // the model agrees with redux
+    }
+    // Neither square nor a whole scale: 5x3 at 7x4, against the model.
+    texture("uitexels53.png", 5, 3);
+    const std::vector<int> got = preview("uitexels53.png", 7, 4), model = uiImageGpuTexels(5, 3, 7, 4);
+    CHECK(got == model && model.front() == 0 && model.back() == (4 << 8 | 2));
+}
+
 void testGpuDumpParse() {
     namespace fs = std::filesystem;
     // A polygon that starts in one GP0 packet and ends in the next, a GP1 word between them.
@@ -16181,6 +17484,139 @@ void testGpuDumpParse() {
     std::vector<uint8_t> cut(bytes.begin(), bytes.end() - 4);
     CHECK(gpudump::parse(cut, d, &err) && d.truncated && d.packets.size() == 7);
     CHECK(gpudump::parse(gpdBytes({gpdPacket(0, {0x200000ff, gpdXY(1, 1)})}), d, &err) && gpudump::decode(d).incomplete);
+}
+
+// psxsplash capture tags (gpudump::PrimTag): 2 GP0(00h) words after a mesh
+// triangle's words name its object, triangle and ordering-table slot.
+uint32_t gpdTag1(unsigned kind, unsigned obj, unsigned tri) { return 0x00a00000u | kind << 18 | (obj >> 10) << 16 | tri; }
+uint32_t gpdTag2(unsigned obj, unsigned slot) { return (obj & 0x3ffu) << 14 | slot; }
+
+void testGpuTags() {
+    namespace fs = std::filesystem;
+    using gpudump::Kind;
+    // A: gouraud-textured triangle, tagged (object 1500 needs the high bits in word 1).
+    const std::vector<uint32_t> a = {0x340000ff, gpdXY(0, 0), 0x7c400010, 0x0000ff00, gpdXY(40, 0), 0x00051120, 0x000000ff, gpdXY(0, 40), 0x00003010};
+    const std::vector<uint32_t> b = {0x200000ff, gpdXY(50, 50), gpdXY(60, 50), gpdXY(50, 60)};       // B: flat, untagged
+    const std::vector<uint32_t> c = {0x3000ff00, gpdXY(5, 5), 0x00ff0000, gpdXY(25, 5), 0x000000ff, gpdXY(5, 25)};  // C: gouraud
+    std::vector<uint32_t> tagged, plain;
+    auto add = [](std::vector<uint32_t>& v, const std::vector<uint32_t>& w) { v.insert(v.end(), w.begin(), w.end()); };
+    add(tagged, a), add(tagged, {gpdTag1(0, 1500, 7), gpdTag2(1500, 300)});
+    add(tagged, b);
+    add(tagged, c), add(tagged, {gpdTag1(1, 3, 65535), gpdTag2(3, 0x3fff)});
+    add(plain, a), add(plain, b), add(plain, c);
+    const gpudump::CommandList t = gpdFrame(tagged), p = gpdFrame(plain);
+    // The tag words are no commands of their own: the same commands and primitives as without them.
+    CHECK(t.commands.size() == p.commands.size() && t.drawn == p.drawn && t.drawn.size() == 3);
+    CHECK(t.tagged == 2 && p.tagged == 0);
+    if (t.drawn.size() == 3 && p.drawn.size() == 3) {
+        const gpudump::Command& ta = t.commands[size_t(t.drawn[0])];
+        const gpudump::Command& tb = t.commands[size_t(t.drawn[1])];
+        const gpudump::Command& tc = t.commands[size_t(t.drawn[2])];
+        CHECK(ta.tag.present && ta.tag.kind == gpudump::kTagMain && ta.tag.obj == 1500 && ta.tag.tri == 7 && ta.tag.slot == 300);
+        CHECK(ta.words.size() == 9 && ta.words == a);  // the tag is not in the polygon's words
+        CHECK(!tb.tag.present);
+        CHECK(tc.tag.present && tc.tag.kind == gpudump::kTagFog && tc.tag.obj == 3 && tc.tag.tri == 65535 &&
+              tc.tag.slot == gpudump::kTagNoSlot);
+        for (int i = 0; i < 3; ++i) CHECK(!p.commands[size_t(p.drawn[size_t(i)])].tag.present);
+        CHECK(gpudump::tagText(ta.tag, nullptr) == "object (#1500), triangle 7, OT slot 300");
+        CHECK(gpudump::tagText(tc.tag, nullptr) == "object (#3), triangle 65535, OT slot ?, fog pass");
+        CHECK(gpudump::tagText(tb.tag, nullptr).empty());
+    }
+    // And they draw the same.
+    CHECK(gpdRender(tagged).vram == gpdRender(plain).vram);
+    // An untagged stream decodes as before: a plain NOP stays a NOP command.
+    {
+        const gpudump::CommandList n = gpdFrame({0x00000000, 0x200000ff, gpdXY(1, 1), gpdXY(9, 1), gpdXY(1, 9), 0x00123456});
+        CHECK(n.commands.size() >= 3 && n.drawn.size() == 1 && n.tagged == 0);
+        int nops = 0;
+        for (const gpudump::Command& cmd : n.commands) nops += cmd.live && cmd.kind == Kind::Nop;
+        CHECK(nops == 2);
+    }
+    // Broken pairs are left alone: word 1 then a fill (no word 2), a stray word 2, a tag after a
+    // rectangle (not a mesh triangle), a second tag after a tagged triangle. Each word stays a NOP.
+    {
+        std::vector<uint32_t> s;
+        add(s, b), add(s, {gpdTag1(0, 9, 9)}), add(s, {0x02000000, gpdXY(0, 100), gpdXY(16, 4)});  // B, lone word 1, fill
+        add(s, {gpdTag2(4, 4)});                                                                  // stray word 2
+        add(s, {0x60ffffff, gpdXY(70, 70), gpdXY(4, 4), gpdTag1(0, 5, 5), gpdTag2(5, 5)});         // rect + tag
+        add(s, c), add(s, {gpdTag1(0, 2, 11), gpdTag2(2, 12), gpdTag1(0, 8, 8), gpdTag2(8, 8)});   // C + 2 tags
+        add(s, b), add(s, {gpdTag1(0, 6, 6)});                                                    // B + word 1 at the end
+        const gpudump::CommandList l = gpdFrame(s);
+        CHECK(l.drawn.size() == 5 && l.tagged == 1);
+        int nops = 0;
+        for (const gpudump::Command& cmd : l.commands) nops += cmd.live && cmd.kind == Kind::Nop;
+        CHECK(nops == 7);
+        if (l.drawn.size() == 5) {
+            CHECK(!l.commands[size_t(l.drawn[0])].tag.present);
+            CHECK(l.commands[size_t(l.drawn[1])].kind == Kind::Fill && !l.commands[size_t(l.drawn[1])].tag.present);
+            CHECK(l.commands[size_t(l.drawn[2])].kind == Kind::Rect && !l.commands[size_t(l.drawn[2])].tag.present);
+            const gpudump::PrimTag& tc = l.commands[size_t(l.drawn[3])].tag;
+            CHECK(tc.present && tc.obj == 2 && tc.tri == 11 && tc.slot == 12);
+            CHECK(!l.commands[size_t(l.drawn[4])].tag.present);
+        }
+    }
+    // A pair split across GP0 packets still pairs; a GP1 word between them breaks it.
+    {
+        std::vector<uint32_t> first = b;
+        first.push_back(gpdTag1(0, 1, 2));
+        auto decodeWith = [&](std::vector<std::vector<uint32_t>> mid) {
+            std::vector<std::vector<uint32_t>> pk = {gpdPacket(1, {0}), gpdPacket(5, {}), gpdPacket(0, first)};
+            pk.insert(pk.end(), mid.begin(), mid.end());
+            pk.push_back(gpdPacket(0, {gpdTag2(1, 3)}));
+            gpudump::Dump d;
+            std::string err;
+            CHECK(gpudump::parse(gpdBytes(pk), d, &err));
+            return gpudump::decode(d);
+        };
+        const gpudump::CommandList joined = decodeWith({}), broken = decodeWith({gpdPacket(1, {0x05000000})});
+        CHECK(joined.tagged == 1 && joined.drawn.size() == 1 && joined.commands[size_t(joined.drawn[0])].tag.slot == 3);
+        CHECK(broken.tagged == 0 && broken.drawn.size() == 1 && !broken.commands[size_t(broken.drawn[0])].tag.present);
+    }
+
+    // Names: the object table and name table of an exported pack.
+    const fs::path project = fs::path(SPLASHEDIT_SOURCE_DIR) / "examples" / "courtyard";
+    const fs::path dir = g_outDir / "gputags";
+    fs::remove_all(dir);
+    fs::create_directories(dir);
+    const splash::Scene sc = splash::loadScene(project / "courtyard.scene");
+    const splash::ExportResult r = splash::exportSplashpack(sc, project, dir / "scene_0.splashpack");
+    CHECK(r.ok());
+    gpudump::TagScene scene;
+    std::string err;
+    CHECK(gpudump::loadTagScene(dir / "scene_0.splashpack", scene, &err));
+    CHECK(int(scene.objects.size()) == r.stats.gameObjects && scene.objects.size() >= 2);
+    int tris = 0, floorObj = -1;
+    for (size_t i = 0; i < scene.objects.size(); ++i) {
+        tris += scene.objects[i].triangles;
+        CHECK(scene.objects[i].looks.size() == scene.objects[i].triangles);
+        if (scene.objects[i].name == "Floor") floorObj = int(i);
+    }
+    CHECK(tris == r.stats.triangles && floorObj >= 0);
+    CHECK(!gpudump::parseTagScene({'S', 'P', 0}, scene, &err) && !err.empty());
+    if (floorObj >= 0) {
+        CHECK(gpudump::loadTagScene(dir / "scene_0.splashpack", scene, &err));
+        const gpudump::TagScene::Object& fo = scene.objects[size_t(floorObj)];
+        // A textured triangle with the floorObj's triangle 0 CLUT and page, tagged as it.
+        const uint32_t look = fo.looks.empty() ? 0 : fo.looks[0];
+        const std::vector<uint32_t> tri = {0x24808080, gpdXY(0, 0), (look & 0xffff0000u) | 0x0000, gpdXY(8, 0), (look & 0x19f) << 16, gpdXY(0, 8), 0};
+        std::vector<uint32_t> s = tri;
+        add(s, {gpdTag1(0, unsigned(floorObj), 0), gpdTag2(unsigned(floorObj), 40)});
+        const gpudump::CommandList l = gpdFrame(s);
+        CHECK(l.tagged == 1);
+        CHECK(gpudump::matchTagScene(l, {scene}) == 0);
+        if (l.tagged == 1)
+            CHECK(gpudump::tagText(l.commands[size_t(l.drawn[0])].tag, &scene) ==
+                  "object Floor (#" + std::to_string(floorObj) + "), triangle 0, OT slot 40");
+        // Two equally good packs: no answer. A pack the triangle index does not fit: not that one.
+        CHECK(gpudump::matchTagScene(l, {scene, scene}) == -1);
+        gpudump::TagScene shortPack = scene;
+        shortPack.objects[size_t(floorObj)].triangles = 0;
+        shortPack.objects[size_t(floorObj)].looks.clear();
+        CHECK(gpudump::matchTagScene(l, {shortPack}) == -1 && gpudump::matchTagScene(l, {shortPack, scene}) == 1);
+        gpudump::TagScene few = scene;
+        few.objects.resize(size_t(floorObj));
+        CHECK(gpudump::matchTagScene(l, {few}) == -1);
+    }
 }
 
 void testGpuDecode() {
@@ -18264,6 +19700,245 @@ static void testTvPreview() {
     CHECK(tv::lookFromName("bogus") == tv::Look::RGB);
 }
 
+// splash::writePlayer over each kind of pcsx-redux install, with stand-in
+// files: what is copied, the launcher each writes, the seeded pcsx.json, a
+// previous export written over and a folder that is neither refused.
+void testStandalonePlayer() {
+    namespace fs = std::filesystem;
+    const fs::path dir = g_outDir / "player";
+    fs::remove_all(dir);
+    fs::create_directories(dir / "disc");
+    auto write = [](const fs::path& p, const std::string& text) {
+        fs::create_directories(p.parent_path());
+        std::ofstream(p, std::ios::binary) << text;
+    };
+    auto read = [](const fs::path& p) {
+        std::ifstream in(p, std::ios::binary);
+        return std::string((std::istreambuf_iterator<char>(in)), {});
+    };
+    auto executable = [](const fs::path& p) {
+#ifdef _WIN32
+        (void)p;
+        return true;
+#else
+        std::error_code ec;
+        return (fs::status(p, ec).permissions() & fs::perms::owner_exec) != fs::perms::none;
+#endif
+    };
+    const fs::path bin = dir / "disc" / "My Game.bin";
+    write(bin, "raw sectors");
+    write(dir / "disc" / "My Game.cue", "FILE \"My Game.bin\" BINARY\n");
+    auto seeded = [&](const fs::path& out) {
+        const nlohmann::json j = nlohmann::json::parse(read(out / "config" / "pcsx.json"), nullptr, false);
+        return j.is_object() && j["emulator"]["ShownAutoUpdateConfig"] == true && j["emulator"]["AutoUpdate"] == false;
+    };
+    auto gameCopied = [&](const fs::path& out) {
+        return read(out / "game" / "My Game.bin") == "raw sectors" &&
+               read(out / "game" / "My Game.cue") == "FILE \"My Game.bin\" BINARY\n";
+    };
+
+    CHECK(splash::playerFileName("My: Game?") == "My Game");
+    CHECK(splash::playerFileName(" ..\"$`%!*") == "Game");
+    CHECK(splash::playerFileName("nul") == "nul Game" && splash::playerFileName("Con.txt") == "Con.txt Game");
+    CHECK(splash::playerFileName("Caf\xc3\xa9 ok.") == "Caf\xc3\xa9 ok" && splash::playerFileName("Caf\xc3\xa9", true) == "Caf");
+
+    // Windows: Play runs pcsx-redux.main (editor::withDefaults); the whole folder goes, the .exe is started.
+    {
+        const fs::path r = dir / "win" / "redux";
+        write(r / "pcsx-redux.exe", "exe");
+        write(r / "pcsx-redux.main", "main");
+        write(r / "SDL3.dll", "dll");
+        write(r / "share" / "fonts.dat", "fonts");
+        splash::ReduxInstall ri;
+        std::string error;
+        CHECK(splash::findReduxInstall(r / "pcsx-redux.main", ri, error));
+        CHECK(ri.kind == splash::ReduxKind::Folder && ri.exe == "pcsx-redux.exe" && ri.os == splash::PlayerOs::Windows);
+        const fs::path out = dir / "out-win";
+        splash::PlayerResult p = splash::writePlayer(bin, r / "pcsx-redux.main", out, "My Game");
+        CHECK(p.error.empty() && p.warnings.empty() && p.os == splash::PlayerOs::Windows);
+        CHECK(p.launcher == out / "My Game.bat");
+        CHECK(read(out / "redux" / "pcsx-redux.exe") == "exe" && read(out / "redux" / "pcsx-redux.main") == "main" &&
+              read(out / "redux" / "SDL3.dll") == "dll" && read(out / "redux" / "share" / "fonts.dat") == "fonts");
+        CHECK(gameCopied(out) && seeded(out));
+        const std::string bat = read(p.launcher);
+        CHECK(bat.rfind("@echo off\r\n", 0) == 0);
+        CHECK(bat.find("start \"\" \"%~dp0redux\\pcsx-redux.exe\" -kiosk -run -iso \"%~dp0game\\My Game.cue\" -portable "
+                       "\"%~dp0config\"\r\n") != std::string::npos);
+        CHECK(fs::is_regular_file(out / splash::kPlayerMarker));
+        // The player folder inside the folder it copies would copy itself.
+        splash::PlayerResult in = splash::writePlayer(bin, r / "pcsx-redux.exe", r / "player", "My Game");
+        CHECK(in.error.find("inside the pcsx-redux") != std::string::npos && !fs::exists(r / "player"));
+    }
+
+    // Windows with the launcher (kLauncherStub): <title>.exe, a copy of it,
+    // and config/launch.txt naming what it starts.
+    {
+        const fs::path r = dir / "win" / "redux";
+        const fs::path stub = dir / "stub" / splash::kLauncherStub;
+        write(stub, std::string("MZ stub\0launcher", 16));
+        const fs::path out = dir / "out-exe";
+        splash::PlayerResult p = splash::writePlayer(bin, r / "pcsx-redux.main", out, "My: Game", stub);
+        CHECK(p.error.empty() && p.warnings.empty() && p.os == splash::PlayerOs::Windows);
+        CHECK(p.launcher == out / "My Game.exe");
+        CHECK(read(p.launcher) == read(stub) && read(p.launcher).size() == 16);
+        CHECK(read(out / "config" / "launch.txt") == "redux/pcsx-redux.exe\ngame/My Game.cue\nconfig\n");
+        CHECK(read(out / splash::kPlayerMarker) == "game\nredux\nconfig\nMy Game.exe\n");
+        CHECK(!fs::exists(out / "My Game.bat") && gameCopied(out) && seeded(out) && read(out / "redux" / "pcsx-redux.exe") == "exe");
+        // Over it with the stub gone: the .bat, with a warning; the .exe goes.
+        splash::PlayerResult bat = splash::writePlayer(bin, r / "pcsx-redux.main", out, "My Game", dir / "stub" / "gone.exe");
+        CHECK(bat.error.empty() && bat.launcher == out / "My Game.bat" && fs::is_regular_file(bat.launcher));
+        CHECK(bat.warnings.size() == 1 && bat.warnings[0].find("gone.exe is missing: the player starts from a .bat") != std::string::npos);
+        CHECK(!fs::exists(out / "My Game.exe") && !fs::exists(out / "config" / "launch.txt"));
+        CHECK(read(out / splash::kPlayerMarker) == "game\nredux\nconfig\nMy Game.bat\n");
+#ifndef _WIN32
+        // An icon off Windows: the .exe all the same, the stub's icon kept, saying so.
+        const std::vector<uint32_t> icon(256, 0xff0000ffu);
+        splash::PlayerResult ic = splash::writePlayer(bin, r / "pcsx-redux.main", dir / "out-exe-icon", "My Game", stub, &icon);
+        CHECK(ic.error.empty() && ic.launcher == dir / "out-exe-icon" / "My Game.exe" && read(ic.launcher) == read(stub));
+        CHECK(ic.warnings.size() == 1 && ic.warnings[0].find("keeps the default icon") != std::string::npos);
+        std::string error;
+        CHECK(!splash::setExeIcon(ic.launcher, icon, error) && error.find("Windows only") != std::string::npos);
+#endif
+    }
+
+    // macOS: the .app around the program.
+    {
+        const fs::path app = dir / "mac" / "PCSX-Redux.app";
+        write(app / "Contents" / "MacOS" / "PCSX-Redux", "macho");
+        write(app / "Contents" / "Info.plist", "plist");
+        write(app / "Contents" / "Frameworks" / "libSDL3.dylib", "dylib");
+        const fs::path out = dir / "out-mac";
+        splash::PlayerResult p = splash::writePlayer(bin, app / "Contents" / "MacOS" / "PCSX-Redux", out, "My Game");
+        CHECK(p.error.empty() && p.os == splash::PlayerOs::Mac && p.launcher == out / "My Game.command");
+        const fs::path copied = out / "redux" / "PCSX-Redux.app" / "Contents";
+        CHECK(read(copied / "MacOS" / "PCSX-Redux") == "macho" && read(copied / "Info.plist") == "plist" &&
+              read(copied / "Frameworks" / "libSDL3.dylib") == "dylib");
+        CHECK(gameCopied(out) && seeded(out) && executable(p.launcher) && executable(copied / "MacOS" / "PCSX-Redux"));
+        const std::string sh = read(p.launcher);
+        CHECK(sh.rfind("#!/bin/sh\n", 0) == 0 && sh.find("here=$(cd \"$(dirname \"$0\")\" && pwd)\n") != std::string::npos);
+        CHECK(sh.find("exec \"$here\"/\"redux/PCSX-Redux.app/Contents/MacOS/PCSX-Redux\" -kiosk -run -iso "
+                      "\"$here\"/\"game/My Game.cue\" -portable \"$here\"/\"config\"\n") != std::string::npos);
+    }
+
+    // Linux: redux/pcsx-redux -> pcsx-redux.AppDir/AppRun -> usr/bin/pcsx-redux, as the bundle has it.
+    {
+        const fs::path r = dir / "lin" / "redux";
+        write(r / "pcsx-redux.AppDir" / "usr" / "bin" / "pcsx-redux", "elf");
+        write(r / "pcsx-redux.AppDir" / "usr" / "lib" / "libfoo.so", "so");
+        std::error_code ec;
+        fs::create_symlink("usr/bin/pcsx-redux", r / "pcsx-redux.AppDir" / "AppRun", ec);
+        if (!ec) fs::create_symlink("pcsx-redux.AppDir/AppRun", r / "pcsx-redux", ec);
+        if (ec) {
+            std::fprintf(stderr, "testStandalonePlayer: no symlinks here (%s), AppDir case skipped\n", ec.message().c_str());
+        } else {
+            splash::ReduxInstall ri;
+            std::string error;
+            CHECK(splash::findReduxInstall(r / "pcsx-redux", ri, error) && ri.kind == splash::ReduxKind::AppDir &&
+                  ri.exe == "pcsx-redux.AppDir/AppRun" && ri.os == splash::PlayerOs::Linux);
+            // The AppRun itself (an extracted AppImage) is the same install.
+            CHECK(splash::findReduxInstall(r / "pcsx-redux.AppDir" / "AppRun", ri, error) &&
+                  ri.kind == splash::ReduxKind::AppDir && ri.root.filename() == "pcsx-redux.AppDir");
+            const fs::path out = dir / "out-lin";
+            splash::PlayerResult p = splash::writePlayer(bin, r / "pcsx-redux", out, "My Game");
+            CHECK(p.error.empty() && p.warnings.empty() && p.os == splash::PlayerOs::Linux && p.launcher == out / "My Game.sh");
+            const fs::path appdir = out / "redux" / "pcsx-redux.AppDir";
+            CHECK(fs::is_symlink(appdir / "AppRun") && fs::read_symlink(appdir / "AppRun") == "usr/bin/pcsx-redux");
+            CHECK(read(appdir / "AppRun") == "elf" && read(appdir / "usr" / "lib" / "libfoo.so") == "so");
+            CHECK(!fs::exists(out / "redux" / "pcsx-redux"));  // the AppDir, not the bundle's folder
+            CHECK(gameCopied(out) && seeded(out) && executable(p.launcher));
+            CHECK(read(p.launcher).find("exec \"$here\"/\"redux/pcsx-redux.AppDir/AppRun\" -kiosk -run -iso "
+                                        "\"$here\"/\"game/My Game.cue\" -portable \"$here\"/\"config\"\n") !=
+                  std::string::npos);
+
+            // Written again under another title: what the first export wrote
+            // is replaced, a file someone added stays.
+            write(out / "config" / "memcard1.mcd", "card");
+            write(out / "README.txt", "readme");
+            splash::PlayerResult again = splash::writePlayer(bin, r / "pcsx-redux", out, "Other");
+            CHECK(again.error.empty() && again.launcher == out / "Other.sh");
+            CHECK(!fs::exists(out / "My Game.sh") && !fs::exists(out / "config" / "memcard1.mcd") && seeded(out));
+            CHECK(read(out / "README.txt") == "readme");
+        }
+    }
+
+    // Anything else (an AppImage) is copied on its own.
+    {
+        const fs::path img = dir / "img" / "pcsx-redux-x86_64.AppImage";
+        write(img, std::string("\x7f" "ELF\x02\x01\x01\0AI\x02", 11) + "rest");
+        const fs::path out = dir / "out-img";
+        splash::PlayerResult p = splash::writePlayer(bin, img, out, "My Game");
+        CHECK(p.error.empty());
+        CHECK(read(out / "redux" / "pcsx-redux-x86_64.AppImage").size() == 15 && executable(out / "redux" / "pcsx-redux-x86_64.AppImage"));
+        CHECK(gameCopied(out) && seeded(out) && executable(p.launcher));
+#if !defined(_WIN32) && !defined(__APPLE__)
+        CHECK(p.launcher == out / "My Game.sh" && p.warnings.size() == 1 && p.warnings[0].find("FUSE") != std::string::npos);
+        CHECK(read(p.launcher).find("exec \"$here\"/\"redux/pcsx-redux-x86_64.AppImage\" -kiosk -run -iso ") != std::string::npos);
+#endif
+        // Not an AppImage: the libraries it needs are not copied with it, so it says so.
+        write(dir / "plain" / "pcsx-redux", "elf");
+        splash::PlayerResult lone = splash::writePlayer(bin, dir / "plain" / "pcsx-redux", dir / "out-plain", "My Game");
+        CHECK(lone.error.empty() && lone.warnings.size() == 1 && lone.warnings[0].find("libraries") != std::string::npos);
+    }
+
+    // A folder holding anything but a player export is refused, and left as it was.
+    {
+        const fs::path out = dir / "foreign";
+        write(out / "notes.txt", "mine");
+        CHECK(splash::playerDirError(out).find("not empty") != std::string::npos);
+        splash::PlayerResult p = splash::writePlayer(bin, dir / "img" / "pcsx-redux-x86_64.AppImage", out, "My Game");
+        CHECK(p.error.find("not empty") != std::string::npos && p.launcher.empty());
+        CHECK(!fs::exists(out / "game") && !fs::exists(out / "redux") && read(out / "notes.txt") == "mine");
+        write(dir / "afile", "x");
+        CHECK(splash::playerDirError(dir / "afile").find("not a folder") != std::string::npos);
+        CHECK(splash::playerDirError(dir / "missing").empty());
+        fs::create_directories(dir / "empty");
+        CHECK(splash::playerDirError(dir / "empty").empty());
+    }
+
+    // No pcsx-redux, or no disc.
+    splash::PlayerResult none = splash::writePlayer(bin, dir / "nothing" / "pcsx-redux", dir / "out-none", "My Game");
+    CHECK(none.error.find("pcsx-redux not found") != std::string::npos && !fs::exists(dir / "out-none"));
+    splash::PlayerResult nodisc =
+        splash::writePlayer(dir / "disc" / "gone.bin", dir / "img" / "pcsx-redux-x86_64.AppImage", dir / "out-nodisc", "My Game");
+    CHECK(nodisc.error.find("disc image not found") != std::string::npos && !fs::exists(dir / "out-nodisc"));
+}
+
+#ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+
+#include "exe_icons.hh"
+
+// splash::setExeIcon on a copy of the launcher: icon group 1 lists the 16, 32
+// and 48 pixel images, the launcher's own icons gone and its manifest kept,
+// the colours and the transparent texel as given.
+void testPlayerExeIcon() {
+    namespace fs = std::filesystem;
+    const fs::path dir = g_outDir / "player-icon";
+    fs::remove_all(dir);
+    fs::create_directories(dir);
+    const fs::path exe = dir / "My Game.exe";
+    fs::copy_file(fs::path(SPLASHEDIT_PLAYER_LAUNCHER), exe);
+    const ExeIcons before = exeIcons(exe.c_str());
+    CHECK(before.icons > 3);
+    std::vector<uint32_t> icon(256, 0xff00ff00u);
+    icon[0] = 0xff0000ffu;  // red, 0xAABBGGRR
+    icon[15] = 0;
+    std::string error;
+    CHECK(splash::setExeIcon(exe, icon, error) && error.empty());
+    const ExeIcons got = exeIcons(exe.c_str());
+    CHECK(got.sizes == std::vector<int>({16, 32, 48}) && got.icons == 3);
+    CHECK(got.topLeft == 0xffff0000u && got.topRightClear);
+    CHECK(got.manifest == before.manifest);
+    CHECK(!splash::setExeIcon(exe, std::vector<uint32_t>(10), error) && error.find("16x16") != std::string::npos);
+}
+#endif
+
 int main(int argc, char** argv) {
     std::error_code ec;
     std::filesystem::path exe = argc > 0 ? std::filesystem::absolute(argv[0], ec) : std::filesystem::path();
@@ -18278,6 +19953,7 @@ int main(int argc, char** argv) {
     testMemCard();
     testDirtyAndSave();
     testComponentFieldsSaveUndo();
+    testClearAssetField();
     testStructure();
     testMove();
     testPick();
@@ -18385,6 +20061,11 @@ int main(int argc, char** argv) {
     testBlocksVariables();
     testSeqRenameBlocks();
     testPlaceModel();
+    testPlaceOneNodeModel();
+    testSetPivot();
+    testSetPivotOtherFiles();
+    testSetPivotBrokenFile();
+    testSetPivotPrefabMode();
     testPlaceSkinnedModel();
     testDefaultClipLoop();
     testClipLoopImportAndEdit();
@@ -18427,10 +20108,12 @@ int main(int argc, char** argv) {
     testUiLoadingRename();
     testUiFonts();
     testUiCanvasDefaultFont();
+    testUiFontSpacing();
     testUiClipboard();
     testUiMultiSelect();
     testUiProblems();
     testUiRender();
+    testUiImageTexels();
     testUiMatchesRuntime();
     testLoaderPack();
     testExportCanvasDefaultFont();
@@ -18447,6 +20130,10 @@ int main(int argc, char** argv) {
     testWavInfo();
     testAudioFormats();
     testDiscMusic();
+    testStandalonePlayer();
+#ifdef _WIN32
+    testPlayerExeIcon();
+#endif
     testMeshColours();
     testVertexPaintEncoding();
     testVertexPaintSave();
@@ -18454,6 +20141,8 @@ int main(int argc, char** argv) {
     testVertexPaintStroke();
     testVertexPaintMulti();
     testVertexPaintMismatch();
+    testVertexAoKernel();
+    testVertexAoBake();
     testMaterials4bpp();
     testMaterials4bppGroup();
     testUvOffsetSlots();
@@ -18467,6 +20156,7 @@ int main(int argc, char** argv) {
     testSpriteDirectionSets();
     testUiSprite();
     testNumberScrub();
+    testNumberKeyStep();
     testMixedScrub();
     testDialogGate();
     testColourHex();
@@ -18492,9 +20182,11 @@ int main(int argc, char** argv) {
     testUnityUi();
     testGpuDumpParse();
     testGpuDecode();
+    testGpuTags();
     testGpuRaster();
     testShadows();
     testListScroll();
+    testPopupPlace();
     testTerrain();
     testPathSampler();
     testPathScene();

@@ -76,6 +76,19 @@ void endPaintStroke(PaintStroke& s, Document& doc);
 
 // Every vertex of `paths` set to `color` in Painted mode, one undo step. Returns how many objects changed.
 int fillPaint(Document& doc, const std::vector<ObjectPath>& paths, Rgb color);
+
+// Ambient occlusion baked into the painted layer (#305): every active,
+// unskinned mesh and terrain in the scene occludes (editor/vertex_ao.hh,
+// from the normals the exporter lights with), and each vertex of `paths`
+// takes what it exports now times 1 - strength * (1 - occlusion), in
+// Painted mode, all of it one undo step. Refused objects are skipped as
+// paintRefusal says. Returns how many objects changed.
+struct OcclusionBake {
+    float distance = 2.0f;  // metres a ray looks for an occluder
+    float strength = 0.6f;  // 0: no change; 1: a fully closed vertex goes black
+    int rays = 128;         // per vertex
+};
+int bakeOcclusion(Document& doc, const std::vector<ObjectPath>& paths, const OcclusionBake& o);
 // Painted mode for the object, its layer started from what it exports now
 // when it has none that fits (so nothing changes on screen). One undo step.
 bool setPaintedMode(Document& doc, const ObjectPath& path);

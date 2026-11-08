@@ -6,7 +6,9 @@
 #include <map>
 
 #include "editor/pick.hh"
+#include "editor/vertex_ao.hh"
 #include "splashpack.hh"
+#include "terrain.hh"
 
 namespace editor {
 
@@ -22,6 +24,43 @@ Rgb toBytes(splash::Vec3 c) { return {splash::colorToPsx(c.x), splash::colorToPs
 
 uint8_t mix(uint8_t a, uint8_t b, float t) {
     return uint8_t(std::clamp(std::lround(float(a) + (float(b) - float(a)) * t), 0l, 255l));
+}
+
+// World-space triangles of everything the occlusion bake lets occlude: each
+// active object's mesh, a terrain's as the exporter builds it from its grid.
+// Skinned meshes are left out, since they move at runtime.
+std::vector<AoTriangle> occluderTriangles(const Document& doc, const std::vector<splash::FlatObject>& flats) {
+    std::vector<AoTriangle> out;
+    for (const splash::FlatObject& fo : flats) {
+        if (!fo.activeInHierarchy || !fo.object->mesh || fo.object->skin) continue;
+        std::optional<splash::Mesh> built;
+        const splash::Mesh* m = nullptr;
+        if (fo.object->terrain) {
+            const int layers = std::max(1, int(fo.object->mesh->materials.size()));
+            try {
+                if (splash::terrainLoaded(*fo.object->terrain)) {
+                    built = splash::buildTerrainMesh(*fo.object->terrain, layers);
+                } else if (!fo.object->terrain->data.empty()) {
+                    splash::TerrainComponent t = *fo.object->terrain;
+                    splash::loadTerrainData(t, doc.resolve(t.data));
+                    built = splash::buildTerrainMesh(t, layers);
+                }
+            } catch (const std::exception&) {
+            }
+            if (built) m = &*built;
+        } else {
+            m = paintMesh(doc, fo.object->mesh->mesh);
+        }
+        if (!m) continue;
+        std::vector<splash::Vec3> wp(m->positions.size());
+        for (size_t i = 0; i < wp.size(); i++) wp[i] = fo.localToWorld.point(m->positions[i]);
+        for (const std::vector<int>& sub : m->submeshes)
+            for (size_t k = 0; k + 2 < sub.size(); k += 3) {
+                const size_t a = size_t(sub[k]), b = size_t(sub[k + 1]), c = size_t(sub[k + 2]);
+                if (a < wp.size() && b < wp.size() && c < wp.size()) out.push_back({wp[a], wp[b], wp[c]});
+            }
+    }
+    return out;
 }
 
 }  // namespace
@@ -216,6 +255,56 @@ int fillPaint(Document& doc, const std::vector<ObjectPath>& paths, Rgb color) {
         const size_t i = size_t(std::find(targets.begin(), targets.end(), p) - targets.begin());
         if (i >= targets.size() || !ob.mesh) return;
         ob.mesh->paint.assign(counts[i], color);
+        ob.mesh->vertexColors = splash::VertexColorMode::Painted;
+    });
+}
+
+int bakeOcclusion(Document& doc, const std::vector<ObjectPath>& paths, const OcclusionBake& o) {
+    const std::vector<splash::FlatObject> flats = splash::flatten(doc.scene());
+    // Every target's vertices in one pass over the scene, each with the
+    // normal the exporter lights it with.
+    std::vector<ObjectPath> targets;
+    std::vector<std::vector<Rgb>> base;
+    std::vector<splash::Vec3> positions, normals;
+    for (const ObjectPath& p : paths) {
+        if (!paintRefusal(doc, p).empty()) continue;
+        const splash::Object* ob = doc.object(p);
+        const splash::FlatObject* fo = flatOf(flats, ob);
+        const splash::Mesh* m = paintMesh(doc, ob->mesh->mesh);
+        std::vector<Rgb> c = currentPaint(doc, p);
+        if (!fo || !m || c.size() != m->positions.size()) continue;
+        const std::vector<splash::Vec3> ln = ob->mesh->smoothNormals ? splash::smoothNormals(*m) : m->normals;
+        for (size_t i = 0; i < m->positions.size(); i++) {
+            positions.push_back(fo->localToWorld.point(m->positions[i]));
+            normals.push_back(splash::normalized(splash::rotate(fo->worldRotation, ln[i])));
+        }
+        targets.push_back(p);
+        base.push_back(std::move(c));
+    }
+    if (targets.empty()) return 0;
+    const std::vector<float> ao = ambientOcclusion(occluderTriangles(doc, flats), positions, normals, o.distance, o.rays);
+    const float strength = std::clamp(o.strength, 0.f, 1.f);
+    std::vector<ObjectPath> go;
+    std::vector<std::vector<Rgb>> layers;
+    size_t at = 0;
+    for (size_t t = 0; t < targets.size(); t++) {
+        std::vector<Rgb> layer(base[t].size());
+        for (size_t v = 0; v < layer.size(); v++, at++) {
+            const float f = 1 - strength * (1 - std::clamp(ao[at], 0.f, 1.f));
+            for (size_t ch = 0; ch < 3; ch++)
+                layer[v][ch] = uint8_t(std::clamp(std::lround(float(base[t][v][ch]) * f), 0l, 255l));
+        }
+        const splash::MeshComponent& mc = *doc.object(targets[t])->mesh;
+        if (mc.vertexColors == splash::VertexColorMode::Painted && mc.paint == layer) continue;
+        go.push_back(targets[t]);
+        layers.push_back(std::move(layer));
+    }
+    if (go.empty()) return 0;
+    doc.endMerge();
+    return doc.editEach(go, [&](const ObjectPath& p, splash::Object& ob) {
+        const size_t i = size_t(std::find(go.begin(), go.end(), p) - go.begin());
+        if (i >= go.size() || !ob.mesh) return;
+        ob.mesh->paint = layers[i];
         ob.mesh->vertexColors = splash::VertexColorMode::Painted;
     });
 }

@@ -261,6 +261,8 @@ Color bake(Vec3 vertex, Vec3 normal, const std::vector<SceneLight>& lights) {
     return fin;
 }
 
+}  // namespace
+
 // PSXMesh.RecalculateSmoothNormals: average over vertices with identical
 // positions (exact float equality, as Dictionary<Vector3> keys).
 std::vector<Vec3> smoothNormals(const Mesh& m) {
@@ -284,6 +286,8 @@ std::vector<Vec3> smoothNormals(const Mesh& m) {
     }
     return out;
 }
+
+namespace {
 
 SceneLight sceneLight(const FlatObject& fo) {
     const LightComponent& l = *fo.object->light;

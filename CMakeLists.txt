@@ -29,7 +29,7 @@ FetchContent_Declare(recastnavigation
 # Pin to the commit psxsplash's nugget uses.
 FetchContent_Declare(psxlua
     GIT_REPOSITORY https://github.com/rixnobis/psxlua.git
-    GIT_TAG 4401a3354e1ffe5f38b028c4d5cedf7c077638bd
+    GIT_TAG f3e9b015feb481cc1257e80609e7138cc3bd82d6
     SOURCE_SUBDIR src)
 # libpsxav's SPU-ADPCM encoder (the one psxavenc uses), and dr_wav to read WAV.
 FetchContent_Declare(psxavenc
@@ -84,10 +84,30 @@ else()
     target_compile_options(make_templates PRIVATE -Wall -Wextra)
 endif()
 
+# The Windows standalone player's <title>.exe (core/player.hh kLauncherStub),
+# shipped beside splashedit.exe.
+if(WIN32)
+    set(SPLASHEDIT_ICON "${CMAKE_CURRENT_SOURCE_DIR}/assets/brand/icon.ico")
+    configure_file(tools/player_launcher/launcher.rc.in ${CMAKE_CURRENT_BINARY_DIR}/player_launcher.rc @ONLY)
+    add_executable(splashedit-player-launcher WIN32 tools/player_launcher/launcher.c ${CMAKE_CURRENT_BINARY_DIR}/player_launcher.rc)
+    target_link_libraries(splashedit-player-launcher PRIVATE kernel32 user32)
+    if(MINGW)
+        target_link_options(splashedit-player-launcher PRIVATE -municode)
+    endif()
+    if(MSVC)
+        # The player folder has no MSVC runtime beside it: the static one.
+        set_target_properties(splashedit-player-launcher PROPERTIES MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+        target_compile_options(splashedit-player-launcher PRIVATE /W4)
+    else()
+        target_compile_options(splashedit-player-launcher PRIVATE -Wall -Wextra)
+    endif()
+endif()
+
 # The editor's document model (history, picking): no SDL or GL, so it builds
 # and tests headless, also with SPLASHEDIT_BUILD_EDITOR off.
 add_library(splasheditdoc STATIC
     src/editor/asset_browser.cpp
+    src/editor/asset_fields.cpp
     src/editor/blocks_edit.cpp
     src/editor/catalog.cpp
     src/editor/memcard.cpp
@@ -97,6 +117,7 @@ add_library(splasheditdoc STATIC
     src/editor/gizmo.cpp
     src/editor/live_export.cpp
     src/editor/meter_fixes.cpp
+    src/editor/pivot.cpp
     src/editor/lua_editor.cpp
     src/editor/play.cpp
     src/editor/linkplay.cpp
@@ -117,6 +138,7 @@ add_library(splasheditdoc STATIC
     src/editor/tv_preview.cpp
     src/editor/unirom.cpp
     src/editor/ui_canvas.cpp
+    src/editor/vertex_ao.cpp
     src/editor/vertex_paint.cpp)
 target_include_directories(splasheditdoc PUBLIC src)
 # src/editor/psxsplash.d.lua (tools/gen_lua_api.py) goes into the editor as
@@ -152,6 +174,11 @@ else()
     target_compile_options(editor_tests PRIVATE -Wall -Wextra)
 endif()
 add_test(NAME editor_tests COMMAND editor_tests)
+if(WIN32)
+    # The icon test (testPlayerExeIcon) works on a copy of the launcher.
+    add_dependencies(editor_tests splashedit-player-launcher)
+    target_compile_definitions(editor_tests PRIVATE SPLASHEDIT_PLAYER_LAUNCHER="$<TARGET_FILE:splashedit-player-launcher>")
+endif()
 
 if(NOT SPLASHEDIT_BUILD_EDITOR)
     return()

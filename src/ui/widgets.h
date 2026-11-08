@@ -112,7 +112,8 @@ struct FieldEdit {
 
 // A number in a well. With `edit`, it is editable: drag horizontally to
 // scrub (faster for larger values, Shift for fine steps), double-click to
-// type (Enter or clicking away commits, Esc cancels). `value` is the text shown.
+// type (Enter or clicking away commits, Esc cancels; while typing, Up and Down
+// step the typed value by ui::keyStep). `value` is the text shown.
 // An `integer` field (pixels, frames) scrubs one per pixel (ui/scrub.hh).
 // A `mixed` field stands for several objects whose values differ (#263):
 // `value` is drawn faint, typing starts empty, and any typed number counts
@@ -141,9 +142,11 @@ bool textEditing(const char* id);
 void textEditNewFrame();
 // `maxLen` caps what can be typed, in bytes (at most 255). `charFilter`, when
 // given, sees each typed character (ImGuiInputTextFlags_CallbackCharFilter):
-// it may change EventChar, or return 1 to drop it.
+// it may change EventChar, or return 1 to drop it. With `upDown`, it edits a
+// number: Up and Down step the typed value by upDown(Shift held) (ui/scrub.hh
+// stepTyped) and stay in the field rather than moving the keyboard focus.
 TextEdit textEdit(const char* id, ImRect field, ImFont* font, float size, float textX, float textRight, std::string* out,
-                  size_t maxLen = 255, ImGuiInputTextCallback charFilter = nullptr);
+                  size_t maxLen = 255, ImGuiInputTextCallback charFilter = nullptr, float (*upDown)(bool shift) = nullptr);
 // A one-line text value in a field well: a click starts typing, Enter or
 // clicking away commits, Esc cancels. Returns true on the frame a changed
 // value is committed, with it in `out`. `placeholder` shows faint while the
@@ -174,8 +177,19 @@ struct PickerItem {
 };
 int picker(const char* id, ImVec2 pos, float width, const char* placeholder, std::string* query, const std::vector<PickerItem>& items);
 
-// Returns true when clicked.
-bool assetField(const char* id, ImRect r, const char* icon, ImU32 iconColor, const char* name, const char* meta);
+// What an asset field asked for this frame: a left click (the caller opens
+// its picker) or a row of its right-click menu.
+enum class AssetAction { None, Clicked, Browse, ShowInProject, ShowInExplorer, Clear };
+// The right-click menu of a file field whose rect `r` was hovered: Browse...,
+// Show in Project, Show in file explorer and Clear (#323). The Show rows and
+// Clear are disabled without a file (`hasFile`); Clear also when not
+// `clearable`. Scripted checks find its rows as <menuName>.menu/<label>.
+// Call it every frame after the field's interact().
+AssetAction assetMenu(const char* id, ImRect r, bool hovered, const char* menuName, bool hasFile, bool clearable = true);
+// A file field showing `name` (and `meta` at its right). With a `menuName` a
+// right click opens assetMenu.
+AssetAction assetField(const char* id, ImRect r, const char* icon, ImU32 iconColor, const char* name, const char* meta,
+                       const char* menuName = nullptr, bool hasFile = false, bool clearable = true);
 // Returns true on the frame the switch is clicked. `mixed` draws the third
 // look (knob in the middle, a dash on it) for values that differ.
 bool toggle(const char* id, ImRect r, bool on, bool mixed = false);
@@ -190,6 +204,13 @@ struct ColorFieldHit {
 // <name>.menu/Paste (`name` defaults to `id`).
 // `mixed`: it stands for several colours (#263); it reads "mixed" over a grey swatch.
 ColorFieldHit colorField(const char* id, ImRect r, const std::array<float, 3>& value, const char* name = nullptr, bool mixed = false);
+// Places the popup `popupId` (as given to BeginPopup, in the current ID scope)
+// for the next BeginPopup: under `field`, or above it when there is no room
+// below, clamped inside the main viewport (#324). `pivot.x` 0 lines its left
+// edge up with the field's, 1 its right edge. Call it where SetNextWindowPos
+// would go; it uses the popup's size from the frame before (popupBelow() in
+// ui/popup_place.hh is the arithmetic).
+void placePopupBelow(const char* popupId, ImRect field, ImVec2 pivot = ImVec2(0, 0));
 void slider(const char* id, ImRect r, float t, const char* value);
 
 // Problem card with an inline fix action (none when fixLabel is null).
