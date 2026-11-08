@@ -2119,6 +2119,14 @@ static void SDLCALL onTrackPicked(void*, const char* const* files, int) {
 }
 static const SDL_DialogFileFilter kAudioFilter[] = {{"Audio (WAV, AIFF, MP3, Ogg, FLAC)", splash::kAudioExtensions},
                                                     {"All files", "*"}};
+static std::mutex g_movieMutex;
+static std::optional<std::string> g_moviePicked;
+static void SDLCALL onMoviePicked(void*, const char* const* files, int) {
+    if (!files || !files[0]) return;
+    std::lock_guard<std::mutex> lock(g_movieMutex);
+    g_moviePicked = files[0];
+}
+static const SDL_DialogFileFilter kMovieFilter[] = {{"Movies (STR, SBS)", "str;sbs"}, {"All files", "*"}};
 
 // A typed volume name character: upper-cased, dropped unless the volume name
 // keeps it (splash::volumeName's rule).
@@ -8993,6 +9001,27 @@ static void sceneInspector(State& st, ImDrawList* dl, ImRect r, float y, editor:
                 scriptLine("disclogo", std::string("disc logo: ") + (ds.bootLogo ? "on" : "off"));
         }
 
+        // Read speed: single for burned discs.
+        {
+            const ImRect br = row("ldiscspeed", "Single speed",
+                                  "For burned discs. A console's laser can read a CD-R perfectly at single speed and "
+                                  "badly at double, where movies skip and scenes can fail to load. On: the whole disc "
+                                  "reads at single speed. Scenes load half as fast, and movies want psxavenc -x 1 and "
+                                  "Movie.Play(name, {speed = 1}).");
+            const ImRect sw(ImVec2(br.Min.x, br.GetCenter().y - 8), ImVec2(br.Min.x + 30, br.GetCenter().y + 8));
+            nameRect("disc.singlespeed", sw);
+            const char* state = ds.singleSpeed ? "Reads at single speed" : "Off: reads at double speed";
+            text(dl, ImVec2(sw.Max.x + space::sm, centerY(f.regular, type::caption, br.Min.y, br.Max.y)), f.regular,
+                 type::caption, color::textFaint, state);
+            if (toggle("discspeed", sw, ds.singleSpeed) && !root.empty()) {
+                splash::DiscSettings next = ds;
+                next.singleSpeed = !ds.singleSpeed;
+                save(std::move(next));
+            }
+            if (namedRectsOn() && ImGui::GetFrameCount() > 1 && !root.empty())
+                scriptLine("discspeed", std::string("disc speed: ") + (ds.singleSpeed ? "single" : "double"));
+        }
+
         // Licence: none, the built-in psxsplash one, or a file.
         const int cur = ds.licence == "none" ? 0 : ds.licence.empty() || ds.licence == "psxsplash" ? 1 : 2;
         const std::string shown = cur == 0 ? "None" : cur == 1 ? "psxsplash" : licenceFile;
@@ -9423,6 +9452,136 @@ static void sceneInspector(State& st, ImDrawList* dl, ImRect r, float y, editor:
                 block += "\ndisc music: track " + std::to_string(i + 2) + " " + tracks[i] + " " +
                          (i < durList.size() ? durList[i] : std::string("missing"));
             scriptLine("discmusic", block);
+        }
+
+        // Movies: what Movie.Play and Movie.PlayOn find under MOVIES/ on the
+        // disc. The same shape as the music list, and from a copy of the list
+        // for the same reason.
+        const std::vector<std::string> movies = ds.movies;
+        {
+            std::optional<std::string> picked;
+            {
+                std::lock_guard<std::mutex> lock(g_movieMutex);
+                picked.swap(g_moviePicked);
+            }
+            if (picked && !root.empty()) {
+                std::error_code ec;
+                const fs::path abs = fs::weakly_canonical(fs::path(std::u8string(picked->begin(), picked->end())), ec);
+                const fs::path base = fs::weakly_canonical(root, ec);
+                const fs::path rel = abs.lexically_relative(base);
+                const std::u8string u = (!rel.empty() && *rel.begin() != "..") ? rel.generic_u8string() : abs.generic_u8string();
+                splash::DiscSettings next = ds;
+                next.movies.push_back(std::string(u.begin(), u.end()));
+                save(std::move(next));
+            }
+        }
+        // A row's words, recomputed when the list changes or now and then.
+        static std::vector<std::string> mvFor, mvInfo;
+        static std::vector<char> mvBad;
+        static double mvAt = -1;
+        if (mvFor != movies || now - mvAt > 1.0) {
+            mvFor = movies;
+            mvAt = now;
+            mvInfo.clear();
+            mvBad.clear();
+            for (const std::string& rel : movies) {
+                const fs::path p = root.empty() ? fs::path(std::u8string(rel.begin(), rel.end()))
+                                                : root / fs::path(std::u8string(rel.begin(), rel.end()));
+                std::error_code fe;
+                std::string d;
+                bool bad = true;
+                if (!fs::is_regular_file(p, fe)) {
+                    d = "missing";
+                } else if (!splash::movieNameFits(p)) {
+                    d = "name too long";
+                } else {
+                    const splash::MovieInfo info = splash::movieInfo(p);
+                    if (!info.ok) {
+                        d = "not a movie";
+                    } else if (info.sbs) {
+                        d = "for a mesh";
+                        bad = false;
+                    } else {
+                        const long secs = long(info.sectors / 150);
+                        char b[48];
+                        std::snprintf(b, sizeof b, "%ux%u  %ld:%02ld%s", info.width, info.height, secs / 60, secs % 60,
+                                      info.audio ? "  sound" : "");
+                        d = b;
+                        bad = false;
+                    }
+                }
+                mvInfo.push_back(d);
+                mvBad.push_back(bad ? 1 : 0);
+            }
+        }
+
+        caption("Movies", color::textDim);
+        int mRemove = -1;
+        for (size_t i = 0; i < movies.size(); ++i) {
+            const ImRect rr(ImVec2(x0 + space::sm, y), ImVec2(x1 - space::sm, y + 28));
+            nameRect("disc.movie" + std::to_string(i), rr);
+            const float ty = centerY(f.regular, type::body, rr.Min.y, rr.Max.y);
+            const fs::path rp(std::u8string(movies[i].begin(), movies[i].end()));
+            const std::string file = utf8(rp.filename());
+            dl->AddText(f.regular, type::body, ImVec2(rr.Min.x + space::xs, ty), color::text, file.c_str(), nullptr);
+            const std::string& d = i < mvInfo.size() ? mvInfo[i] : std::string();
+            const bool bad = i < mvBad.size() && mvBad[i];
+            const float dw = f.regular->CalcTextSizeA(type::body, FLT_MAX, 0, d.c_str()).x;
+            const float bw = 22;
+            dl->AddText(f.regular, type::body, ImVec2(rr.Max.x - bw - 8 - dw, ty), bad ? color::warn : color::textDim,
+                        d.c_str(), nullptr);
+            ImGui::PushID(int(2000 + i));
+            const ImRect del(ImVec2(rr.Max.x - bw, rr.Min.y + 3), ImVec2(rr.Max.x, rr.Max.y - 3));
+            nameRect("disc.movie" + std::to_string(i) + ".remove", del);
+            if (iconButton("mremove", del, icon::x, false, "Remove movie")) mRemove = int(i);
+            ImGui::PopID();
+            y += 28;
+        }
+        if (mRemove >= 0) {
+            splash::DiscSettings next = ds;
+            next.movies.erase(next.movies.begin() + mRemove);
+            save(std::move(next));
+        }
+        // Add: the project's movie files, then "Choose file...".
+        static std::vector<std::string> movieFiles;
+        static fs::path movieRoot;
+        static double movieAt = -1;
+        if (root != movieRoot || now - movieAt > 1.0) {
+            movieRoot = root;
+            movieAt = now;
+            movieFiles.clear();
+            std::error_code ec;
+            if (!root.empty())
+                for (fs::recursive_directory_iterator it(root, fs::directory_options::skip_permission_denied, ec), end;
+                     !ec && it != end; it.increment(ec))
+                    if (it->is_regular_file(ec) && splash::isMovieFile(it->path()))
+                        movieFiles.push_back(utf8(it->path().lexically_relative(root).generic_u8string()));
+            std::sort(movieFiles.begin(), movieFiles.end());
+        }
+        std::vector<const char*> addMovies;
+        for (const std::string& a : movieFiles) addMovies.push_back(a.c_str());
+        addMovies.push_back("Choose file...");
+        const ImRect addMovieRow(ImVec2(x0 + space::sm, y + space::xs), ImVec2(x0 + space::sm + 220, y + space::xs + size::field));
+        nameRect("disc.addmovie", addMovieRow);
+        const int moviePick = dropdownMenu("disc.addmovie", addMovieRow, icon::plus, "Add movie", addMovies, -1);
+        if (moviePick >= 0 && moviePick < int(movieFiles.size())) {
+            splash::DiscSettings next = ds;
+            next.movies.push_back(movieFiles[size_t(moviePick)]);
+            save(std::move(next));
+        } else if (moviePick == int(movieFiles.size())) {
+            const std::string loc = utf8(root);
+            ui::showOpenFileDialog("movie", onMoviePicked, nullptr, kMovieFilter, 1, root.empty() ? nullptr : loc.c_str(), false);
+        }
+        y += size::field + space::xs + space::sm;
+        caption("Movies play from a disc image only: Movie.Play(\"INTRO\") plays intro.str, Movie.PlayOn a .sbs on a mesh.",
+                color::textFaint);
+        caption("Make them with psxavenc: -t str for a movie with sound, -t sbs -a 1024 for a mesh.", color::textFaint);
+        if (namedRectsOn() && ImGui::GetFrameCount() > 1 && !root.empty()) {
+            // Scripted tests: the whole list after every change, one block.
+            std::string block = "disc movies: " + std::to_string(movies.size()) + " movies";
+            for (size_t i = 0; i < movies.size(); ++i)
+                block += "\ndisc movies: " + movies[i] + " " + (i < mvInfo.size() ? mvInfo[i] : std::string("missing"));
+            scriptLine("discmovies", block);
         }
 
         if (namedRectsOn() && ImGui::GetFrameCount() > 1 && !root.empty()) {

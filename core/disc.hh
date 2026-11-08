@@ -106,13 +106,19 @@ std::pair<std::string, std::string> licenceText(const std::vector<LicenceSector>
 // a "tracks" entry that is not a string is skipped. "bootLogo": false = the
 // disc boots the psxsplash build without the boot logo (the editor picks
 // psxsplash-cdrom-nologo); missing or not a bool reads as true, and it is
-// written only when false. writeDiscSettings returns false when the file
-// cannot be written.
+// written only when false. `movies` are STR files (loadMovie) in the same form
+// as tracks, written only when there are any: Movie.Play("INTRO") plays
+// intro.str. "singleSpeed": true = psxsplash reads the whole disc at single
+// speed, for burned discs (a console's laser can read a CD-R perfectly at single
+// and badly at double); written only when true. writeDiscSettings returns false
+// when the file cannot be written.
 struct DiscSettings {
     std::string volume;
     std::string licence;
     std::vector<std::string> tracks;
+    std::vector<std::string> movies;
     bool bootLogo = true;
+    bool singleSpeed = false;
 };
 DiscSettings readDiscSettings(const std::filesystem::path& file);
 bool writeDiscSettings(const std::filesystem::path& file, const DiscSettings& s);
@@ -131,11 +137,45 @@ std::vector<LicenceSector> resolveLicence(const std::string& licence, const std:
                                           std::string& error);
 
 // A file on the disc. `path` is "NAME.EXT" or "DIR/NAME.EXT", upper case, no
-// ";1": the writer adds the version.
+// ";1": the writer adds the version. With `mode2`, `data` is whole Mode 2
+// sectors of kMode2Sector bytes, a subheader then its payload, as a movie has to
+// be for its XA audio to reach the drive: each sector is written with the
+// subheader it came with (its EDC and ECC computed here) and the directory gives
+// the file's size as 2048 bytes a sector, as mkpsxiso does.
 struct DiscFile {
     std::string path;
     std::vector<uint8_t> data;
+    bool mode2 = false;
 };
+
+constexpr size_t kMode2Sector = 2336;
+
+// `file` (made with psxavenc) as MOVIES/<STEM>.STR, in any of its layouts: -t str
+// (2336-byte sectors), -t strcd (2352, the sync and header dropped) or -t strv
+// (2048, video only, given Form 1 subheaders). A .sbs (psxavenc -t sbs) goes as
+// plain data, MOVIES/<STEM>.SBS, for Movie.PlayOn. The stem is upper-cased. Throws
+// std::runtime_error when the file is none of these or has no video sector.
+DiscFile loadMovie(const std::filesystem::path& file);
+
+// What a movie file is, for a list, from its start alone: a long movie is not
+// read to draw a row. `ok` when loadMovie would take it by the look of it;
+// `sbs` when it is frames for Movie.PlayOn, whose size only the mesh it plays on
+// says. `sectors` are its sectors on the disc, 150 a second at double speed.
+struct MovieInfo {
+    bool ok = false;
+    bool sbs = false;
+    bool audio = false;
+    uint32_t width = 0;
+    uint32_t height = 0;
+    uint32_t sectors = 0;
+};
+MovieInfo movieInfo(const std::filesystem::path& file);
+
+// A .str or .sbs file, whatever its case.
+bool isMovieFile(const std::filesystem::path& file);
+// Whether the file's stem can be a name on the disc and in Movie.Play: A-Z, 0-9
+// and _ once upper-cased, 8 characters at most.
+bool movieNameFits(const std::filesystem::path& file);
 
 // A CD-DA track as written: `start` is its INDEX 01 LBA (after its 150-sector
 // pregap), `sectors` its PCM sectors (the pregap not counted).
@@ -197,7 +237,9 @@ DiscInfo writeLicenceImage(const std::vector<LicenceSector>& licence, const std:
 // bad size is an error. `disc.tracks` become CD-DA tracks 2 and up (paths
 // relative to `projectRoot`, decoded with loadCdAudio); one that is missing
 // or cannot be decoded is the error "music track <N>: <why>" (N its disc
-// track number, 2 for the first). A disc longer than 74 minutes (333000
+// track number, 2 for the first). `disc.movies` go under MOVIES/ (see
+// loadMovie); one that is missing or is not a movie is the error
+// "movie <file>: <why>". A disc longer than 74 minutes (333000
 // sectors) is a warning naming its length in minutes; longer than 80
 // (360000) is an error and no image is written. Errors land in the result;
 // with more than one scene,
